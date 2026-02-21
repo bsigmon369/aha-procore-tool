@@ -1,4 +1,8 @@
 import { NextResponse } from "next/server";
+import { kv } from "@vercel/kv";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -25,5 +29,22 @@ export async function GET(request) {
   });
 
   const data = await response.json();
-  return NextResponse.json(data);
+
+  if (!response.ok) {
+    return NextResponse.json({ error: "Token exchange failed", data }, { status: 500 });
+  }
+
+  // Store refresh token in KV (source of truth)
+  if (data.refresh_token) {
+    await kv.set("procore:refresh_token", data.refresh_token);
+  }
+
+  // Return safe confirmation (does NOT leak token)
+  return NextResponse.json({
+    ok: true,
+    storedInKV: Boolean(data.refresh_token),
+    refreshTokenLength: data.refresh_token?.length || 0,
+    expires_in: data.expires_in,
+    scope: data.scope,
+  });
 }
