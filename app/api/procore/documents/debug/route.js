@@ -5,17 +5,30 @@ import { NextResponse } from "next/server";
 import { procoreFetch } from "../../../../../lib/procoreAuth";
 
 export async function GET(req) {
-  const { searchParams } = new URL(req.url);
-  const projectId = searchParams.get("projectId");
-  const parentId = searchParams.get("parentId");
+  try {
+    const { searchParams } = new URL(req.url);
+    const projectId = searchParams.get("projectId");
+    const parentId = searchParams.get("parentId"); // optional
 
-  const qs = new URLSearchParams({ project_id: projectId });
+    if (!projectId) {
+      return NextResponse.json({ error: "Missing projectId" }, { status: 400 });
+    }
 
-  if (parentId) {
-    qs.set("parent_folder_id", parentId); // ← IMPORTANT
+    // Try BOTH param styles (some accounts differ)
+    const url =
+      parentId
+        ? `/rest/v1.0/folders?project_id=${projectId}&parent_folder_id=${parentId}`
+        : `/rest/v1.0/folders?project_id=${projectId}`;
+
+    const resp = await procoreFetch(url);
+    const data = await resp.json();
+
+    return NextResponse.json({ url, data });
+  } catch (err) {
+    // Surface the thrown message from procoreFetch()
+    return NextResponse.json(
+      { error: err?.message || "Unknown error" },
+      { status: 500 }
+    );
   }
-
-  const resp = await procoreFetch(`/rest/v1.0/folders?${qs.toString()}`);
-  const data = await resp.json();
-  return NextResponse.json(data);
 }
