@@ -9,10 +9,8 @@ export async function GET() {
   const commit = process.env.VERCEL_GIT_COMMIT_SHA || null;
   const redirectUri = process.env.PROCORE_REDIRECT_URI || null;
 
-  // KV is now source of truth
   const kvToken = (await kv.get("procore:refresh_token")) || "";
   const envToken = process.env.PROCORE_REFRESH_TOKEN || "";
-
   const pick = kvToken || envToken;
 
   const fp = {
@@ -47,12 +45,18 @@ export async function GET() {
       return NextResponse.json({ ...fp, ok: false, tokenEndpoint: tokenUrl, data }, { status: 500 });
     }
 
+    // ✅ THIS IS THE KEY FIX: persist rotated token
+    if (data.refresh_token && data.refresh_token !== pick) {
+      await kv.set("procore:refresh_token", data.refresh_token);
+    }
+
     return NextResponse.json({
       ...fp,
       ok: true,
       expires_in: data.expires_in,
       access_token_length: data.access_token?.length || 0,
       rotated_refresh_token_returned: Boolean(data.refresh_token),
+      rotated_refresh_token_saved_to_kv: Boolean(data.refresh_token && data.refresh_token !== pick),
     });
   } catch (err) {
     return NextResponse.json({ ...fp, ok: false, error: err?.message || "Unknown error" }, { status: 500 });
