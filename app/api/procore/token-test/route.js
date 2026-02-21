@@ -5,13 +5,19 @@ import { NextResponse } from "next/server";
 import { getAccessToken } from "../../../../lib/procoreAuth";
 
 export async function GET() {
+  const fingerprint = {
+    commit: process.env.VERCEL_GIT_COMMIT_SHA || null,
+    refreshTokenLength: process.env.PROCORE_REFRESH_TOKEN?.length || 0,
+    redirectUri: process.env.PROCORE_REDIRECT_URI || null,
+  };
+
   try {
-    // Force refresh by busting cache (module-level cache)
-    // We can’t access the `cached` object directly here, so we force a refresh by calling token endpoint indirectly:
-    // easiest: temporarily set a query flag in procoreAuth later, but for now just call getAccessToken() and see if it fails.
     const token = await getAccessToken();
-    return NextResponse.json({ ok: true, tokenLength: token.length });
+    return NextResponse.json({ ...fingerprint, ok: true, tokenLength: token.length });
   } catch (err) {
-    return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
+    return NextResponse.json(
+      { ...fingerprint, ok: false, error: err?.message || "Unknown error" },
+      { status: 500 }
+    );
   }
 }
