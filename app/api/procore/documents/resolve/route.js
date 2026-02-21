@@ -1,16 +1,9 @@
-// app/api/procore/documents/resolve/route.js
 import { NextResponse } from "next/server";
-import { resolveFolderWithDocumentsFix } from "@/lib/procoreDocuments";
+import { resolveFolderWithDocumentsFix } from "../../../../../lib/procoreDocuments";
 
-/**
- * Your required paths (WITHOUT assuming "Documents" is a real folder node).
- */
 const TEMPLATE_PATH = ["09 Submittals", "01 AHA's", "01 AHA Template"];
 const COMPLETED_PATH = ["09 Submittals", "01 AHA's", "02 Completed AHA's"];
 
-/**
- * GET /api/procore/documents/resolve?projectId=XXXX&companyId=YYYY (companyId optional)
- */
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
@@ -18,13 +11,9 @@ export async function GET(req) {
     const companyId = searchParams.get("companyId") || process.env.PROCORE_COMPANY_ID || null;
 
     if (!projectId) {
-      return NextResponse.json(
-        { error: "Missing required query param: projectId" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing projectId" }, { status: 400 });
     }
 
-    // Project scope: resolve both folders in the project’s Documents tool
     const templateFolder = await resolveFolderWithDocumentsFix({
       scope: "project",
       projectId,
@@ -44,17 +33,10 @@ export async function GET(req) {
       completedFolder: completedFolder ? { id: completedFolder.id, name: completedFolder.name } : null,
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: err?.message || "Unknown error", stack: process.env.NODE_ENV === "development" ? err?.stack : undefined },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message || "Unknown error" }, { status: 500 });
   }
 }
 
-/**
- * POST { projectId, companyId? }
- * Same response as GET.
- */
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
@@ -62,10 +44,7 @@ export async function POST(req) {
     const companyId = body.companyId || process.env.PROCORE_COMPANY_ID || null;
 
     if (!projectId) {
-      return NextResponse.json(
-        { error: "Missing required JSON body field: projectId" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing projectId" }, { status: 400 });
     }
 
     const templateFolder = await resolveFolderWithDocumentsFix({
@@ -87,9 +66,6 @@ export async function POST(req) {
       completedFolder: completedFolder ? { id: completedFolder.id, name: completedFolder.name } : null,
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: err?.message || "Unknown error", stack: process.env.NODE_ENV === "development" ? err?.stack : undefined },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message || "Unknown error" }, { status: 500 });
   }
 }
