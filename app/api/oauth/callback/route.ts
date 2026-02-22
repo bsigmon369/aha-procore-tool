@@ -85,7 +85,8 @@ export async function GET(request: Request) {
     name: getSessionCookieName(),
     value: sessionValue,
     httpOnly: true,
-    sameSite: "lax",
+-   sameSite: "lax",
++   sameSite: "none",
     secure: true,
     path: "/",
   });
