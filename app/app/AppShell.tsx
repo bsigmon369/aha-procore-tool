@@ -188,8 +188,8 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         <h1>AHA Builder</h1>
         <p style={{ color: "crimson" }}>{error || "Authentication required."}</p>
         <p>
-          This usually means the Procore embedded app URL parameters were not interpolated (e.g.
-          company_id={{"{procore.company.id}"}}).
+          This usually means the Procore embedded app URL parameters were not interpolated (example:
+          company_id=%7B%7Bprocore.company.id%7D%7D).
         </p>
       </div>
     );
