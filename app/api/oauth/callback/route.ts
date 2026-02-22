@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
+import { getSessionCookieName, createSessionValue } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -14,22 +15,15 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing code" }, { status: 400 });
   }
 
-  // TEMP SAFE: accept companyId from (1) state, (2) query param, (3) env default
-  // Once everything works, you can remove the query param fallback.
-  let companyId =
-    searchParams.get("company_id") ||
-    process.env.PROCORE_DEFAULT_COMPANY_ID ||
-    "";
+  let companyId = searchParams.get("company_id") || process.env.PROCORE_DEFAULT_COMPANY_ID || "";
+  let returnTo = searchParams.get("return_to") || "/app";
 
   if (state) {
     try {
-      const decoded = JSON.parse(
-        Buffer.from(state, "base64url").toString("utf8")
-      );
+      const decoded = JSON.parse(Buffer.from(state, "base64url").toString("utf8"));
       if (decoded?.companyId) companyId = String(decoded.companyId);
-    } catch {
-      // ignore bad state
-    }
+      if (decoded?.returnTo) returnTo = String(decoded.returnTo);
+    } catch {}
   }
 
   if (!companyId) {
@@ -38,7 +32,6 @@ export async function GET(request: Request) {
 
   const tokenUrl = `${process.env.PROCORE_BASE_URL}/oauth/token`;
 
-  // IMPORTANT: redirect_uri must match authorize redirect_uri EXACTLY
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -57,13 +50,10 @@ export async function GET(request: Request) {
   const tokenData = await tokenRes.json();
 
   if (!tokenRes.ok) {
-    return NextResponse.json(
-      { error: "Token exchange failed", data: tokenData },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Token exchange failed", data: tokenData }, { status: 500 });
   }
 
-  // Fetch /me to get user_id
+  // Fetch /me to resolve Procore user id
   const meRes = await fetch(`${process.env.PROCORE_BASE_URL}/rest/v1.0/me`, {
     headers: {
       Authorization: `Bearer ${tokenData.access_token}`,
@@ -75,27 +65,30 @@ export async function GET(request: Request) {
   const me = await meRes.json();
 
   if (!meRes.ok || !me?.id) {
-    return NextResponse.json(
-      { error: "Failed to fetch /me", data: me },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch /me", data: me }, { status: 500 });
   }
 
-  // Store refresh token per company + user
-  // Store refresh token per company + user
-if (tokenData.refresh_token) {
-  const userKey = `procore:rt:${companyId}:${me.id}`;
-  await kv.set(userKey, tokenData.refresh_token);
+  // Store refresh token per company+user (and company-level last)
+  if (tokenData.refresh_token) {
+    await kv.set(`procore:rt:${companyId}:${me.id}`, tokenData.refresh_token);
+    await kv.set(`procore:rt:${companyId}`, tokenData.refresh_token);
+  }
 
-  // ADD THIS fallback:
-  const companyKey = `procore:rt:${companyId}`;
-  await kv.set(companyKey, tokenData.refresh_token);
-}
+  // Set HttpOnly session cookie (so embedded mode does NOT need user_id in URL)
+  const sessionValue = createSessionValue({
+    companyId: String(companyId),
+    userId: String(me.id),
+  });
 
-  // Redirect back into the app (prevents users from refreshing the callback and reusing the code)
-  const redirectTo = `/app?company_id=${encodeURIComponent(
-    companyId
-  )}&user_id=${encodeURIComponent(String(me.id))}`;
+  const res = NextResponse.redirect(new URL(returnTo, request.url));
+  res.cookies.set({
+    name: getSessionCookieName(),
+    value: sessionValue,
+    httpOnly: true,
+    sameSite: "lax",
+    secure: true,
+    path: "/",
+  });
 
-  return NextResponse.redirect(new URL(redirectTo, request.url));
+  return res;
 }
