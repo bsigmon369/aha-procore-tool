@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
-import { refreshAccessToken } from "@/lib/procore/oauth";
+import { refreshAccessToken } from "../../../../../lib/procore/procoreAuth";
 
 export const dynamic = "force-dynamic";
 
