@@ -7,7 +7,7 @@ type Mode = "embedded" | "standalone";
 type Context = {
   companyId?: string;
   projectId?: string;
-  userId?: string; // ignored in embedded; kept for backward compat
+  userId?: string;
 };
 
 type Project = {
@@ -21,6 +21,10 @@ type BootstrapState =
   | { status: "needsAuth" }
   | { status: "ready"; me: any };
 
+function isNumericId(v?: string) {
+  return typeof v === "string" && /^[0-9]+$/.test(v);
+}
+
 export default function AppShell({ mode, context }: { mode: Mode; context: Context }) {
   const companyId = context.companyId;
   const projectId = context.projectId;
@@ -28,12 +32,10 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
   const [boot, setBoot] = useState<BootstrapState>({ status: "loading" });
   const [error, setError] = useState<string | null>(null);
 
-  // AHA input/output
   const [sentence, setSentence] = useState("");
   const [ahaJson, setAhaJson] = useState<any>(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Debug: projects list
   const [showDebugProjects, setShowDebugProjects] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsError, setProjectsError] = useState<string | null>(null);
@@ -44,7 +46,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     return projectId ? `${base}&project_id=${encodeURIComponent(projectId)}` : base;
   }, [companyId, projectId]);
 
-  // --- Embedded bootstrap ---
   useEffect(() => {
     let cancelled = false;
 
@@ -53,8 +54,11 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       setBoot({ status: "loading" });
 
       if (mode === "embedded") {
-        if (!companyId) {
-          if (!cancelled) setBoot({ status: "needsAuth" });
+        if (!isNumericId(companyId)) {
+          if (!cancelled) {
+            setError("Embedded launch params were not resolved by Procore (company_id missing/invalid).");
+            setBoot({ status: "needsAuth" });
+          }
           return;
         }
 
@@ -70,7 +74,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         }
 
         if (bootRes.status === 401) {
-          // In embedded mode, auto-start OAuth
           window.location.href = `/api/oauth/start?company_id=${encodeURIComponent(
             companyId
           )}&return_to=${encodeURIComponent(returnTo)}`;
@@ -85,7 +88,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         return;
       }
 
-      // Standalone mode: user clicks connect
       if (!cancelled) setBoot({ status: "needsAuth" });
     };
 
@@ -96,7 +98,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     };
   }, [mode, companyId, returnTo]);
 
-  // --- Debug: load projects on demand ---
   const loadProjects = async () => {
     if (!companyId) return;
     setProjectsError(null);
@@ -119,7 +120,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     }
   };
 
-  // --- AHA generate ---
   const generateAha = async () => {
     if (!companyId || !projectId) {
       setError("Missing company_id or project_id in embedded context.");
@@ -157,7 +157,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     }
   };
 
-  // --- UI ---
   if (boot.status === "loading") {
     return <div style={{ padding: 40 }}>Loading AHA Builder…</div>;
   }
@@ -183,6 +182,19 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     );
   }
 
+  if (boot.status === "needsAuth" && mode === "embedded") {
+    return (
+      <div style={{ padding: 40 }}>
+        <h1>AHA Builder</h1>
+        <p style={{ color: "crimson" }}>{error || "Authentication required."}</p>
+        <p>
+          This usually means the Procore embedded app URL parameters were not interpolated (e.g.
+          company_id={{"{procore.company.id}"}}).
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div style={{ padding: 40, maxWidth: 900 }}>
       <h1>AHA Builder</h1>
@@ -202,7 +214,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         </div>
       ) : null}
 
-      {/* Core AHA UX */}
       <div style={{ padding: 14, border: "1px solid #e5e5e5", borderRadius: 10 }}>
         <h3 style={{ marginTop: 0 }}>Describe the activity</h3>
         <p style={{ marginTop: 6, color: "#444" }}>
@@ -275,7 +286,6 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         ) : null}
       </div>
 
-      {/* Debug section */}
       <div style={{ marginTop: 16 }}>
         <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
