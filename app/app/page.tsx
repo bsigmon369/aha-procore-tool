@@ -14,7 +14,7 @@ export default function Page({
   const userId =
     typeof searchParams.user_id === "string" ? searchParams.user_id : undefined;
 
-  const mode = companyId && userId ? "embedded" : "standalone";
+  const mode = companyId ? "embedded" : "standalone";
 
   return <AppShell mode={mode} context={{ companyId, projectId, userId }} />;
 }
