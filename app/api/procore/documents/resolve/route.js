@@ -115,3 +115,79 @@ export async function POST(req) {
     return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
   }
 }
+// app/api/procore/documents/resolve/route.js
+
+import { resolveFolderWithDocumentsFix } from "@/lib/procoreDocuments";
+
+async function resolveWithTrace({ procoreFetch, companyId, projectId, pathSegments }) {
+  // Clone resolver logic just enough to emit trace
+  const trace = [];
+
+  // root
+  let folderId = null;
+
+  // root children
+  const root = await procoreFetch(`/rest/v1.0/folders?project_id=${projectId}`, {
+    method: "GET",
+    headers: { "Procore-Company-Id": String(companyId) },
+  });
+
+  let children = Array.isArray(root?.files) ? root.files : Array.isArray(root) ? root : [];
+  children = children.filter((it) => it?.is_folder === true || it?.type === "folder");
+
+  for (const seg of pathSegments) {
+    trace.push({
+      segment: seg,
+      sampleChildren: children.slice(0, 25).map((c) => ({ id: c.id, name: c.name, title: c.title })),
+    });
+
+    // Let the fixed resolver do the real match logic by resolving prefix each time
+    const prefix = pathSegments.slice(0, trace.length);
+    const resolved = await resolveFolderWithDocumentsFix({
+      procoreFetch,
+      companyId,
+      projectId,
+      pathSegments: prefix,
+    });
+
+    if (!resolved) return { folder: null, trace, failedAt: seg };
+
+    folderId = resolved.id;
+
+    const next = await procoreFetch(`/rest/v1.0/folders/${folderId}?project_id=${projectId}`, {
+      method: "GET",
+      headers: { "Procore-Company-Id": String(companyId) },
+    });
+
+    children = Array.isArray(next?.files) ? next.files : [];
+    children = children.filter((it) => it?.is_folder === true || it?.type === "folder");
+  }
+
+  const folder = await resolveFolderWithDocumentsFix({ procoreFetch, companyId, projectId, pathSegments });
+  return { folder, trace, failedAt: null };
+}
+
+export async function GET(req) {
+  const { searchParams } = new URL(req.url);
+  const companyId = searchParams.get("company_id");
+  const projectId = searchParams.get("project_id");
+
+  // ... your session + procoreFetch creation here ...
+
+  const templatePath = ["09 Submittals", "00 Preparation", "01 AHA's", "01 AHA Template"];
+  const completedPath = ["09 Submittals", "00 Preparation", "01 AHA's", "02 Completed AHA's"];
+
+  const template = await resolveWithTrace({ procoreFetch, companyId, projectId, pathSegments: templatePath });
+  const completed = await resolveWithTrace({ procoreFetch, companyId, projectId, pathSegments: completedPath });
+
+  return Response.json({
+    ok: true,
+    templateFolder: template.folder,
+    completedFolder: completed.folder,
+    debug: {
+      template,
+      completed,
+    },
+    paths: { template: templatePath, completed: completedPath },
+  });
+}
