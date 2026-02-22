@@ -11,22 +11,21 @@ export async function GET(req) {
     return NextResponse.json({ error: "Missing projectId" }, { status: 400 });
   }
 
-  // Get all companies visible to this token
   const companiesResp = await procoreFetchSafe("/rest/v1.0/companies");
   if (!companiesResp.ok) {
     return NextResponse.json({ step: "companies", ...companiesResp }, { status: 500 });
   }
 
   const companies = companiesResp.data || [];
-  const results = [];
+  const tried = [];
 
-  // Try to fetch the project in each company context
   for (const c of companies) {
-    const r = await procoreFetchSafe(`/rest/v1.0/projects/${targetProjectId}`, {
-      headers: { "Procore-Company-Id": String(c.id) },
-    });
+    const r = await procoreFetchSafe(
+      `/rest/v1.0/projects/${targetProjectId}?company_id=${c.id}`,
+      { headers: { "Procore-Company-Id": String(c.id) } }
+    );
 
-    results.push({
+    tried.push({
       companyId: c.id,
       companyName: c.name,
       ok: r.ok,
@@ -40,7 +39,7 @@ export async function GET(req) {
         projectId: targetProjectId,
         matchedCompany: { id: c.id, name: c.name },
         project: r.data,
-        tried: results,
+        tried,
       });
     }
   }
@@ -49,6 +48,6 @@ export async function GET(req) {
     ok: false,
     projectId: targetProjectId,
     message: "Project not found under any accessible company context for this token.",
-    tried: results,
+    tried,
   });
 }
