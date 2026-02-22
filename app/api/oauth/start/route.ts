@@ -1,410 +1,50 @@
-"use client";
+import { NextResponse } from "next/server";
+import { kv } from "@vercel/kv";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-type Mode = "embedded" | "standalone";
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
 
-type Context = {
-  companyId?: string;
-  projectId?: string;
-  userId?: string; // ignored in embedded; kept for backward compat
-};
+  const companyId =
+    searchParams.get("company_id") ||
+    process.env.PROCORE_COMPANY_ID ||
+    process.env.PROCORE_DEFAULT_COMPANY_ID ||
+    "";
 
-type Project = {
-  id: number;
-  project_number?: string;
-  name: string;
-};
+  const returnTo = searchParams.get("return_to") || "/app";
 
-type BootstrapState =
-  | { status: "loading" }
-  | { status: "needsAuth" }
-  | { status: "ready"; me: any };
-
-export default function AppShell({ mode, context }: { mode: Mode; context: Context }) {
-  const companyId = context.companyId;
-  const projectId = context.projectId;
-
-  const [boot, setBoot] = useState<BootstrapState>({ status: "loading" });
-  const [error, setError] = useState<string | null>(null);
-
-  // AHA input/output
-  const [sentence, setSentence] = useState("");
-  const [ahaJson, setAhaJson] = useState<any>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-
-  // Debug: projects list
-  const [showDebugProjects, setShowDebugProjects] = useState(false);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectsError, setProjectsError] = useState<string | null>(null);
-  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
-
-  const oauthInFlightRef = useRef(false);
-
-  const returnTo = useMemo(() => {
-    const base = `/app?company_id=${encodeURIComponent(companyId || "")}`;
-    return projectId ? `${base}&project_id=${encodeURIComponent(projectId)}` : base;
-  }, [companyId, projectId]);
-
-  async function startEmbeddedOAuthPopup() {
-    if (!companyId) return;
-
-    if (oauthInFlightRef.current) return;
-    oauthInFlightRef.current = true;
-
-    const popup = window.open(
-      `/api/oauth/start?company_id=${encodeURIComponent(companyId)}&return_to=${encodeURIComponent(returnTo)}`,
-      "aha_procore_oauth",
-      "width=520,height=720"
-    );
-
-    const cleanup = () => {
-      window.removeEventListener("message", onMessage);
-      oauthInFlightRef.current = false;
-    };
-
-    const onMessage = async (evt: MessageEvent) => {
-      // Only accept messages from our own origin
-      if (evt.origin !== window.location.origin) return;
-      const data: any = evt.data;
-      if (!data || data.type !== "AHA_OAUTH_DONE") return;
-      if (!data.nonce) return;
-
-      try {
-        // Claim cookie in the iframe context (this is the key step)
-        const claim = await fetch(
-          `/api/oauth/claim?nonce=${encodeURIComponent(data.nonce)}&company_id=${encodeURIComponent(companyId)}`,
-          { cache: "no-store" }
-        );
-
-        const cj = await claim.json().catch(() => null);
-        if (!claim.ok || !cj?.ok) {
-          setError(cj?.error || `OAuth claim failed (${claim.status})`);
-          cleanup();
-          return;
-        }
-
-        // Close popup if still open
-        try {
-          popup?.close();
-        } catch {}
-
-        cleanup();
-
-        // Re-run bootstrap by reloading (simple + reliable)
-        window.location.reload();
-      } catch (e: any) {
-        setError(e?.message || "OAuth claim failed");
-        cleanup();
-      }
-    };
-
-    window.addEventListener("message", onMessage);
-
-    // If popup blocked/closed, reset
-    setTimeout(() => {
-      if (popup && popup.closed) {
-        oauthInFlightRef.current = false;
-        window.removeEventListener("message", onMessage);
-      }
-    }, 1500);
-  }
-
-  // --- Embedded bootstrap ---
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async () => {
-      setError(null);
-      setBoot({ status: "loading" });
-
-      if (mode === "embedded") {
-        if (!companyId) {
-          if (!cancelled) setBoot({ status: "needsAuth" });
-          return;
-        }
-
-        const bootRes = await fetch(
-          `/api/procore/auth/embedded-bootstrap?company_id=${encodeURIComponent(companyId)}`,
-          { cache: "no-store" }
-        );
-
-        if (bootRes.ok) {
-          const bootJson = await bootRes.json().catch(() => null);
-          if (!cancelled) setBoot({ status: "ready", me: bootJson?.me });
-          return;
-        }
-
-        if (bootRes.status === 401) {
-          // IMPORTANT: Do NOT redirect the iframe to Procore OAuth.
-          // Use popup + claim so cookie is set in iframe context.
-          if (!cancelled) {
-            setBoot({ status: "needsAuth" });
-            startEmbeddedOAuthPopup();
-          }
-          return;
-        }
-
-        const bootBody = await bootRes.json().catch(() => null);
-        if (!cancelled) {
-          setError(bootBody?.error || `Bootstrap failed (${bootRes.status})`);
-          setBoot({ status: "needsAuth" });
-        }
-        return;
-      }
-
-      // Standalone mode: user clicks connect
-      if (!cancelled) setBoot({ status: "needsAuth" });
-    };
-
-    run();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [mode, companyId, returnTo]);
-
-  // --- Debug: load projects on demand ---
-  const loadProjects = async () => {
-    if (!companyId) return;
-    setProjectsError(null);
-    setIsLoadingProjects(true);
-    try {
-      const pr = await fetch(
-        `/api/procore/projects/list?company_id=${encodeURIComponent(companyId)}`,
-        { cache: "no-store" }
-      );
-      const pj = await pr.json().catch(() => null);
-      if (pj?.ok && Array.isArray(pj.sample)) {
-        setProjects(pj.sample);
-      } else {
-        setProjectsError(pj?.error || pj?.details?.data?.error?.message || "Failed to load projects");
-      }
-    } catch (e: any) {
-      setProjectsError(e?.message || "Failed to load projects");
-    } finally {
-      setIsLoadingProjects(false);
-    }
-  };
-
-  // --- AHA generate ---
-  const generateAha = async () => {
-    if (!companyId || !projectId) {
-      setError("Missing company_id or project_id in embedded context.");
-      return;
-    }
-    if (!sentence.trim()) return;
-
-    setError(null);
-    setAhaJson(null);
-    setIsGenerating(true);
-
-    try {
-      const res = await fetch("/api/aha/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        cache: "no-store",
-        body: JSON.stringify({
-          companyId,
-          projectId,
-          sentence: sentence.trim(),
-        }),
-      });
-
-      const json = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        throw new Error(json?.error || `Generate failed (${res.status})`);
-      }
-
-      setAhaJson(json);
-    } catch (e: any) {
-      setError(e?.message || "Generate failed");
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  // --- UI ---
-  if (boot.status === "loading") {
-    return <div style={{ padding: 40 }}>Loading AHA Builder…</div>;
-  }
-
-  if (boot.status === "needsAuth" && mode === "standalone") {
-    return (
-      <div style={{ padding: 40 }}>
-        <h1>AHA Builder</h1>
-        <p>Connect your Procore account to continue.</p>
-        <a
-          href="/api/oauth/start"
-          style={{
-            display: "inline-block",
-            padding: "10px 14px",
-            border: "1px solid #ccc",
-            borderRadius: 6,
-            textDecoration: "none",
-          }}
-        >
-          Connect Procore
-        </a>
-      </div>
+  if (!companyId) {
+    return NextResponse.json(
+      {
+        error:
+          "Missing companyId. Provide ?company_id=### or set PROCORE_COMPANY_ID (or PROCORE_DEFAULT_COMPANY_ID) in env.",
+      },
+      { status: 400 }
     );
   }
 
-  if (boot.status === "needsAuth" && mode === "embedded") {
-    return (
-      <div style={{ padding: 40 }}>
-        <h1>AHA Builder</h1>
-        <p>Connecting to Procore…</p>
-        <button
-          onClick={() => startEmbeddedOAuthPopup()}
-          style={{
-            display: "inline-block",
-            padding: "10px 14px",
-            border: "1px solid #ccc",
-            borderRadius: 6,
-            background: "white",
-            cursor: "pointer",
-          }}
-        >
-          Connect Procore
-        </button>
-        {error ? <p style={{ color: "crimson" }}>Error: {error}</p> : null}
-      </div>
-    );
-  }
+  const baseUrl = process.env.PROCORE_BASE_URL!;
+  const clientId = process.env.PROCORE_CLIENT_ID!;
+  const redirectUri = process.env.PROCORE_REDIRECT_URI!;
 
-  return (
-    <div style={{ padding: 40, maxWidth: 900 }}>
-      <h1>AHA Builder</h1>
+  const nonce = crypto.randomUUID();
 
-      <div style={{ marginTop: 10 }}>
-        <p>Mode: {mode}</p>
-        <p>Company: {companyId || "N/A"}</p>
-        <p>Project: {projectId || "N/A"}</p>
-        <p>User: (resolved via session cookie)</p>
-      </div>
-
-      <hr style={{ margin: "16px 0" }} />
-
-      {error ? (
-        <div style={{ marginBottom: 16 }}>
-          <p style={{ color: "crimson" }}>Error: {error}</p>
-        </div>
-      ) : null}
-
-      <div style={{ padding: 14, border: "1px solid #e5e5e5", borderRadius: 10 }}>
-        <h3 style={{ marginTop: 0 }}>Describe the activity</h3>
-        <p style={{ marginTop: 6, color: "#444" }}>
-          Type one sentence. We’ll generate a structured AHA and (next) fill & upload the PDF.
-        </p>
-
-        <textarea
-          value={sentence}
-          onChange={(e) => setSentence(e.target.value)}
-          placeholder='Example: "Install 24x24 fire damper in corridor wall at Level 2 using Hilti anchors and seal with fire caulk."'
-          rows={4}
-          style={{
-            width: "100%",
-            padding: 10,
-            borderRadius: 8,
-            border: "1px solid #ddd",
-          }}
-        />
-
-        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-          <button
-            disabled={isGenerating || !sentence.trim()}
-            onClick={generateAha}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid #111",
-              background: isGenerating ? "#f5f5f5" : "#111",
-              color: isGenerating ? "#111" : "#fff",
-              cursor: isGenerating ? "not-allowed" : "pointer",
-            }}
-          >
-            {isGenerating ? "Generating…" : "Generate AHA"}
-          </button>
-
-          <button
-            onClick={() => {
-              setSentence("");
-              setAhaJson(null);
-              setError(null);
-            }}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid #ccc",
-              background: "#fff",
-              cursor: "pointer",
-            }}
-          >
-            Clear
-          </button>
-
-          <button
-            onClick={() => setShowDebugProjects((v) => !v)}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid #ccc",
-              background: "#fff",
-              cursor: "pointer",
-            }}
-          >
-            Debug Projects
-          </button>
-        </div>
-      </div>
-
-      {ahaJson ? (
-        <pre
-          style={{
-            marginTop: 16,
-            padding: 14,
-            background: "#f7f7f7",
-            borderRadius: 10,
-            overflowX: "auto",
-          }}
-        >
-          {JSON.stringify(ahaJson, null, 2)}
-        </pre>
-      ) : null}
-
-      {showDebugProjects ? (
-        <div style={{ marginTop: 16, padding: 14, border: "1px solid #eee", borderRadius: 10 }}>
-          <h3 style={{ marginTop: 0 }}>Projects (debug)</h3>
-          <button
-            onClick={loadProjects}
-            disabled={isLoadingProjects}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "1px solid #ccc",
-              background: "#fff",
-              cursor: isLoadingProjects ? "not-allowed" : "pointer",
-            }}
-          >
-            {isLoadingProjects ? "Loading…" : "Load sample projects"}
-          </button>
-
-          {projectsError ? <p style={{ color: "crimson" }}>Error: {projectsError}</p> : null}
-
-          {projects.length ? (
-            <ul>
-              {projects.map((p) => (
-                <li key={p.id}>
-                  {p.project_number ? `${p.project_number} — ` : ""}
-                  {p.name} (ID: {p.id})
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+  await kv.set(
+    `oauth:state:${nonce}`,
+    { companyId: String(companyId), returnTo: String(returnTo) },
+    { ex: 300 }
   );
+
+  const state = Buffer.from(JSON.stringify({ nonce })).toString("base64url");
+
+  const authorizeUrl =
+    `${baseUrl}/oauth/authorize` +
+    `?client_id=${encodeURIComponent(clientId)}` +
+    `&response_type=code` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${encodeURIComponent(state)}`;
+
+  return NextResponse.redirect(authorizeUrl);
 }
