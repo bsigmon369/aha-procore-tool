@@ -89,6 +89,7 @@ export async function GET(request: Request) {
     "Secure",
     "SameSite=None",
     "Partitioned",
+    "Max-Age=2592000",
   ].join("; ");
 
   res.headers.append("Set-Cookie", cookie);
