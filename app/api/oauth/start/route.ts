@@ -9,17 +9,18 @@ export async function GET(request: Request) {
 
   const companyId =
     searchParams.get("company_id") ||
+    searchParams.get("companyId") ||
     process.env.PROCORE_COMPANY_ID ||
     process.env.PROCORE_DEFAULT_COMPANY_ID ||
     "";
 
-  const returnTo = searchParams.get("return_to") || "/app";
+  const returnTo = searchParams.get("return_to") || searchParams.get("returnTo") || "/app";
 
   if (!companyId) {
     return NextResponse.json(
       {
         error:
-          "Missing companyId. Provide ?company_id=### or set PROCORE_COMPANY_ID (or PROCORE_DEFAULT_COMPANY_ID) in env.",
+          "Missing companyId. Provide ?company_id=### (or ?companyId=###) or set PROCORE_COMPANY_ID / PROCORE_DEFAULT_COMPANY_ID in env.",
       },
       { status: 400 }
     );
