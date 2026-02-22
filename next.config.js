@@ -1,7 +1,11 @@
+const path = require("path");
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Force server build output (prevents "export" behavior)
-  output: "standalone",
+  webpack: (config) => {
+    config.resolve.alias["@"] = path.resolve(__dirname);
+    return config;
+  },
 };
 
 module.exports = nextConfig;
