@@ -6,7 +6,7 @@ export function GET(request: Request) {
 
   const baseUrl = process.env.PROCORE_BASE_URL!;
   const clientId = process.env.PROCORE_CLIENT_ID!;
-  const redirectUri = process.env.PROCORE_REDIRECT_URI!;
+  const redirectUri = process.env.PROCORE_REDIRECT_URI!; // MUST be constant
 
   const state = Buffer.from(JSON.stringify({ companyId })).toString("base64url");
 
