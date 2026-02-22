@@ -244,31 +244,48 @@ export async function POST(req: Request) {
 
     const openaiPayload = await openaiRes.json();
 
-    if (!openaiRes.ok) {
-      return NextResponse.json(
-        { ok: false, error: "OpenAI error", details: openaiPayload },
-        { status: 502 }
-      );
-    }
+if (!openaiRes.ok) {
+  return NextResponse.json(
+    { ok: false, error: "OpenAI error", details: openaiPayload },
+    { status: 502 }
+  );
+}
 
-    const jsonText = extractJsonTextFromResponsesApi(openaiPayload);
-    if (!jsonText) {
-      return NextResponse.json(
-        { ok: false, error: "OpenAI returned no JSON text", details: openaiPayload },
-        { status: 502 }
-      );
+// Try to find JSON text in the response
+const jsonText =
+  (typeof openaiPayload?.output_text === "string" && openaiPayload.output_text.trim()) ||
+  (() => {
+    const out = openaiPayload?.output;
+    if (!Array.isArray(out)) return null;
+    const chunks: string[] = [];
+    for (const item of out) {
+      const content = item?.content;
+      if (!Array.isArray(content)) continue;
+      for (const c of content) {
+        if (typeof c?.text === "string" && c.text.trim()) chunks.push(c.text);
+      }
     }
+    const joined = chunks.join("\n").trim();
+    return joined || null;
+  })();
 
-    let aha: any;
-    try {
-      aha = JSON.parse(jsonText);
-    } catch {
-      return NextResponse.json(
-        { ok: false, error: "Failed to parse JSON from model output", raw: jsonText },
-        { status: 502 }
-      );
-    }
+if (!jsonText) {
+  // show payload so we can adjust extraction if OpenAI changes shape
+  return NextResponse.json(
+    { ok: false, error: "OpenAI returned no JSON text", details: openaiPayload },
+    { status: 502 }
+  );
+}
 
+let aha: any;
+try {
+  aha = JSON.parse(jsonText);
+} catch {
+  return NextResponse.json(
+    { ok: false, error: "Failed to parse JSON from model output", raw: jsonText },
+    { status: 502 }
+  );
+}
     // Server-side normalization (don’t trust the model for these fields)
     aha.meta = {
       schemaVersion: "1.0",
