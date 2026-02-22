@@ -2,24 +2,26 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 import { NextResponse } from "next/server";
-import { procoreFetch } from "../../../../../lib/procoreAuth";
+import { procoreFetchSafe } from "../../../../../lib/procoreAuth";
+import { listProjectDocumentsV2 } from "../../../../../lib/procoreDocumentsV2";
 
 export async function GET(req) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const projectId = searchParams.get("projectId");
-    const parentFolderId = searchParams.get("parentFolderId"); // optional
+  const { searchParams } = new URL(req.url);
+  const projectId = searchParams.get("projectId");
+  if (!projectId) return NextResponse.json({ error: "Missing projectId" }, { status: 400 });
 
-    if (!projectId) return NextResponse.json({ error: "Missing projectId" }, { status: 400 });
+  // Probe legacy v1 folders (what you tried)
+  const v1 = await procoreFetchSafe(`/rest/v1.0/folders?project_id=${projectId}`);
 
-    const qs = new URLSearchParams({ project_id: String(projectId) });
-    if (parentFolderId) qs.set("parent_id", String(parentFolderId)); // try parent_id first
+  // Probe v2 documents (newer)
+  const v2 = await listProjectDocumentsV2(projectId);
 
-    const resp = await procoreFetch(`/rest/v1.0/folders?${qs.toString()}`);
-    const data = await resp.json();
-
-    return NextResponse.json({ ok: true, projectId, parentFolderId: parentFolderId || null, data });
-  } catch (err) {
-    return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
-  }
+  return NextResponse.json({
+    ok: true,
+    projectId,
+    probes: {
+      v1Folders: { ok: v1.ok, status: v1.status, url: v1.url, sample: v1.data },
+      v2Documents: { ok: v2.ok, status: v2.status, url: v2.url, sample: v2.data },
+    },
+  });
 }
