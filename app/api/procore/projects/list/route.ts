@@ -25,13 +25,18 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Session/company mismatch" }, { status: 401 });
   }
 
-  const r = await procoreFetchSafe("/rest/v1.0/projects?per_page=25", {}, companyId, session.userId);
+  // ✅ INCLUDE company_id IN QUERY STRING (do not rely only on header)
+  const r = await procoreFetchSafe(
+    `/rest/v1.0/projects?company_id=${encodeURIComponent(companyId)}&per_page=25`,
+    {},
+    companyId,
+    session.userId
+  );
 
   if (!r.ok) {
     return NextResponse.json({ ok: false, error: "Procore error", details: r }, { status: 500 });
   }
 
-  // return a small sample so UI is stable
   const sample =
     Array.isArray(r.data)
       ? r.data.slice(0, 10).map((p: any) => ({
