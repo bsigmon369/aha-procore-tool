@@ -7,7 +7,7 @@ type Mode = "embedded" | "standalone";
 type Context = {
   companyId?: string;
   projectId?: string;
-  userId?: string; // ignored in embedded; kept for backward compatibility
+  userId?: string; // ignored in embedded; kept for backward compat
 };
 
 type Project = {
@@ -16,79 +16,77 @@ type Project = {
   name: string;
 };
 
-export default function AppShell({ mode, context }: { mode: Mode; context: Context }) {
-  const [status, setStatus] = useState<"loading" | "ready" | "needsAuth">("loading");
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [error, setError] = useState<string | null>(null);
+type BootstrapState =
+  | { status: "loading" }
+  | { status: "needsAuth" }
+  | { status: "ready"; me: any };
 
+export default function AppShell({ mode, context }: { mode: Mode; context: Context }) {
   const companyId = context.companyId;
   const projectId = context.projectId;
+
+  const [boot, setBoot] = useState<BootstrapState>({ status: "loading" });
+  const [error, setError] = useState<string | null>(null);
+
+  // AHA input/output
+  const [sentence, setSentence] = useState("");
+  const [ahaJson, setAhaJson] = useState<any>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  // Debug: projects list
+  const [showDebugProjects, setShowDebugProjects] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
 
   const returnTo = useMemo(() => {
     const base = `/app?company_id=${encodeURIComponent(companyId || "")}`;
     return projectId ? `${base}&project_id=${encodeURIComponent(projectId)}` : base;
   }, [companyId, projectId]);
 
+  // --- Embedded bootstrap ---
   useEffect(() => {
     let cancelled = false;
 
     const run = async () => {
       setError(null);
-      setStatus("loading");
+      setBoot({ status: "loading" });
 
-      // Embedded mode: launched from Procore with company_id (+ project_id). No user_id expected.
       if (mode === "embedded") {
         if (!companyId) {
-          if (!cancelled) setStatus("needsAuth");
+          if (!cancelled) setBoot({ status: "needsAuth" });
           return;
         }
 
-        // 1) Bootstrap: validates cookie session + can mint access token
-        const boot = await fetch(
+        const bootRes = await fetch(
           `/api/procore/auth/embedded-bootstrap?company_id=${encodeURIComponent(companyId)}`,
           { cache: "no-store" }
         );
 
-        if (boot.ok) {
-          // 2) Load some projects (sample) to prove API calls work
-          const pr = await fetch(
-            `/api/procore/projects/list?company_id=${encodeURIComponent(companyId)}`,
-            { cache: "no-store" }
-          );
-
-          const pj = await pr.json().catch(() => null);
-
-          if (!cancelled) {
-            if (pj?.ok && Array.isArray(pj.sample)) {
-              setProjects(pj.sample);
-              setStatus("ready");
-            } else {
-              setError(pj?.error || pj?.data?.error || "Failed to load projects");
-              setStatus("ready");
-            }
-          }
+        if (bootRes.ok) {
+          const bootJson = await bootRes.json().catch(() => null);
+          if (!cancelled) setBoot({ status: "ready", me: bootJson?.me });
           return;
         }
 
-        // Not authenticated: go to OAuth immediately (no button in embedded)
-        if (boot.status === 401) {
+        if (bootRes.status === 401) {
+          // In embedded mode, auto-start OAuth
           window.location.href = `/api/oauth/start?company_id=${encodeURIComponent(
             companyId
           )}&return_to=${encodeURIComponent(returnTo)}`;
           return;
         }
 
-        // Other failures
-        const bootBody = await boot.json().catch(() => null);
+        const bootBody = await bootRes.json().catch(() => null);
         if (!cancelled) {
-          setError(bootBody?.error || `Bootstrap failed (${boot.status})`);
-          setStatus("needsAuth");
+          setError(bootBody?.error || `Bootstrap failed (${bootRes.status})`);
+          setBoot({ status: "needsAuth" });
         }
         return;
       }
 
-      // Standalone mode: show connect button
-      if (!cancelled) setStatus("needsAuth");
+      // Standalone mode: user clicks connect
+      if (!cancelled) setBoot({ status: "needsAuth" });
     };
 
     run();
@@ -98,22 +96,95 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     };
   }, [mode, companyId, returnTo]);
 
-  if (status === "loading") {
+  // --- Debug: load projects on demand ---
+  const loadProjects = async () => {
+    if (!companyId) return;
+    setProjectsError(null);
+    setIsLoadingProjects(true);
+    try {
+      const pr = await fetch(
+        `/api/procore/projects/list?company_id=${encodeURIComponent(companyId)}`,
+        { cache: "no-store" }
+      );
+      const pj = await pr.json().catch(() => null);
+      if (pj?.ok && Array.isArray(pj.sample)) {
+        setProjects(pj.sample);
+      } else {
+        setProjectsError(pj?.error || pj?.details?.data?.error?.message || "Failed to load projects");
+      }
+    } catch (e: any) {
+      setProjectsError(e?.message || "Failed to load projects");
+    } finally {
+      setIsLoadingProjects(false);
+    }
+  };
+
+  // --- AHA generate ---
+  const generateAha = async () => {
+    if (!companyId || !projectId) {
+      setError("Missing company_id or project_id in embedded context.");
+      return;
+    }
+    if (!sentence.trim()) return;
+
+    setError(null);
+    setAhaJson(null);
+    setIsGenerating(true);
+
+    try {
+      const res = await fetch("/api/aha/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          companyId,
+          projectId,
+          sentence: sentence.trim(),
+        }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        throw new Error(json?.error || `Generate failed (${res.status})`);
+      }
+
+      setAhaJson(json);
+    } catch (e: any) {
+      setError(e?.message || "Generate failed");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // --- UI ---
+  if (boot.status === "loading") {
     return <div style={{ padding: 40 }}>Loading AHA Builder…</div>;
   }
 
-  if (status === "needsAuth" && mode === "standalone") {
+  if (boot.status === "needsAuth" && mode === "standalone") {
     return (
       <div style={{ padding: 40 }}>
         <h1>AHA Builder</h1>
         <p>Connect your Procore account to continue.</p>
-        <button onClick={() => (window.location.href = "/api/oauth/start")}>Connect Procore</button>
+        <a
+          href="/api/oauth/start"
+          style={{
+            display: "inline-block",
+            padding: "10px 14px",
+            border: "1px solid #ccc",
+            borderRadius: 6,
+            textDecoration: "none",
+          }}
+        >
+          Connect Procore
+        </a>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: 40 }}>
+    <div style={{ padding: 40, maxWidth: 900 }}>
       <h1>AHA Builder</h1>
 
       <div style={{ marginTop: 10 }}>
@@ -126,26 +197,125 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       <hr style={{ margin: "16px 0" }} />
 
       {error ? (
-        <div>
+        <div style={{ marginBottom: 16 }}>
           <p style={{ color: "crimson" }}>Error: {error}</p>
         </div>
-      ) : (
-        <div>
-          <h3>Projects (sample)</h3>
-          {projects.length === 0 ? (
-            <p>No projects returned.</p>
-          ) : (
-            <ul>
-              {projects.map((p) => (
-                <li key={p.id}>
-                  {(p.project_number ? `${p.project_number} — ` : "")}
-                  {p.name} (#{p.id})
-                </li>
-              ))}
-            </ul>
-          )}
+      ) : null}
+
+      {/* Core AHA UX */}
+      <div style={{ padding: 14, border: "1px solid #e5e5e5", borderRadius: 10 }}>
+        <h3 style={{ marginTop: 0 }}>Describe the activity</h3>
+        <p style={{ marginTop: 6, color: "#444" }}>
+          Type one sentence. We’ll generate a structured AHA and (next) fill & upload the PDF.
+        </p>
+
+        <textarea
+          value={sentence}
+          onChange={(e) => setSentence(e.target.value)}
+          placeholder='Example: "Install 24x24 fire damper in corridor wall at Level 2 using Hilti anchors and seal with fire caulk."'
+          rows={4}
+          style={{
+            width: "100%",
+            padding: 10,
+            borderRadius: 8,
+            border: "1px solid #ccc",
+            fontFamily: "inherit",
+            resize: "vertical",
+          }}
+        />
+
+        <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
+          <button
+            onClick={generateAha}
+            disabled={isGenerating || !sentence.trim() || !companyId || !projectId}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 8,
+              border: "1px solid #ccc",
+              cursor: isGenerating ? "not-allowed" : "pointer",
+            }}
+          >
+            {isGenerating ? "Generating…" : "Generate AHA"}
+          </button>
+
+          <button
+            onClick={() => {
+              setSentence("");
+              setAhaJson(null);
+              setError(null);
+            }}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 8,
+              border: "1px solid #ccc",
+              cursor: "pointer",
+              background: "white",
+            }}
+          >
+            Clear
+          </button>
         </div>
-      )}
+
+        {ahaJson ? (
+          <div style={{ marginTop: 14 }}>
+            <h4 style={{ marginBottom: 8 }}>Generated (debug JSON)</h4>
+            <pre
+              style={{
+                background: "#fafafa",
+                border: "1px solid #eee",
+                borderRadius: 8,
+                padding: 12,
+                overflowX: "auto",
+                fontSize: 12,
+              }}
+            >
+              {JSON.stringify(ahaJson, null, 2)}
+            </pre>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Debug section */}
+      <div style={{ marginTop: 16 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={showDebugProjects}
+            onChange={(e) => setShowDebugProjects(e.target.checked)}
+          />
+          Debug: show project list
+        </label>
+
+        {showDebugProjects ? (
+          <div style={{ marginTop: 10 }}>
+            <button
+              onClick={loadProjects}
+              disabled={isLoadingProjects || !companyId}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: "1px solid #ccc",
+                cursor: "pointer",
+              }}
+            >
+              {isLoadingProjects ? "Loading…" : "Load Projects (sample)"}
+            </button>
+
+            {projectsError ? <p style={{ color: "crimson" }}>{projectsError}</p> : null}
+
+            {projects.length ? (
+              <ul style={{ marginTop: 10 }}>
+                {projects.map((p) => (
+                  <li key={p.id}>
+                    {(p.project_number ? `${p.project_number} — ` : "")}
+                    {p.name} (#{p.id})
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
