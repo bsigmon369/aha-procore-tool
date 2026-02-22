@@ -119,7 +119,7 @@ export async function POST(req: Request) {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["step", "hazards", "controls", "rac"],
+            required: ["step", "hazards", "controls", "rac", "probability", "severity"],
             properties: {
               step: { type: "string" },
               hazards: { type: "string" },
@@ -156,7 +156,7 @@ export async function POST(req: Request) {
               items: {
                 type: "object",
                 additionalProperties: false,
-                required: ["activity", "designatedPerson"],
+                required: ["activity", "designatedPerson", "proofRequired", "proofNote"],
                 properties: {
                   activity: { type: "string" },
                   designatedPerson: { type: "string" },
@@ -172,7 +172,7 @@ export async function POST(req: Request) {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["namePrint", "date"],
+            required: ["namePrint", "signature", "date"],
             properties: {
               namePrint: { type: "string" },
               signature: { type: "string" },
@@ -185,7 +185,7 @@ export async function POST(req: Request) {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["namePrint", "date"],
+            required: ["namePrint", "signature", "date"],
             properties: {
               namePrint: { type: "string" },
               signature: { type: "string" },
@@ -197,12 +197,14 @@ export async function POST(req: Request) {
     };
 
     const system = [
-      "You are a construction safety professional generating an Activity Hazard Analysis (AHA) for a General Contractor.",
-      "Return ONLY valid JSON matching the provided schema.",
-      "Be specific, practical, and trade-appropriate. Prefer controls that are enforceable and verifiable (permits, inspections, competent person, barricades, PPE, LOTO, lifts, housekeeping, exclusion zones, etc.).",
-      "Generate at least 3 job steps even if the input sentence is short.",
-      "Use RAC codes: E (Extremely High), H (High), M (Moderate), L (Low).",
-    ].join(" ");
+  "You are a construction safety professional generating an Activity Hazard Analysis (AHA) for a General Contractor.",
+  "Return ONLY valid JSON matching the provided schema.",
+  "Be specific, practical, and trade-appropriate. Prefer controls that are enforceable and verifiable (permits, inspections, competent person, barricades, PPE, LOTO, lifts, housekeeping, exclusion zones, etc.).",
+  "Generate at least 3 job steps even if the input sentence is short.",
+  "Use RAC codes: E (Extremely High), H (High), M (Moderate), L (Low).",
+  "Every jobStepRow MUST include probability and severity.",
+  "Set all signature fields to an empty string unless a real signature is provided.",
+].join(" ");
 
     const user = [
       `Company ID: ${companyId}`,
@@ -230,13 +232,13 @@ export async function POST(req: Request) {
         ],
         // Structured Outputs (strict JSON Schema)
         text: {
-  format: {
-    type: "json_schema",
-    name: "aha_v1",
-    schema,
-    strict: true,
-  },
-},
+          format: {
+            type: "json_schema",
+            name: "aha_v1",
+            schema,
+            strict: true,
+          },
+        },
         // keep costs predictable
         temperature: 0.2,
       }),
