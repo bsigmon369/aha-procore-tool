@@ -25,8 +25,8 @@ import { resolveFolderWithDocumentsFix } from "../../../../../lib/procoreDocumen
 import { readSessionValue, getSessionCookieName } from "../../../../../lib/session";
 
 // Full paths relative to Procore Documents root
-const TEMPLATE_PATH = ["09 Submittals", "00 Preperation", "01 AHA's", "01 AHA Template"];
-const COMPLETED_PATH = ["09 Submittals", "00 Preperation", "01 AHA's", "02 Completed AHA's"];
+const TEMPLATE_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "01 AHA Template"];
+const COMPLETED_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "02 Completed AHA's"];
 
 /**
  * Supports BOTH query param styles:
