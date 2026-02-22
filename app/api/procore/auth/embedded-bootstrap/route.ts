@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
-import { refreshAccessToken } from "../../../../../lib/procore/procoreAuth";
+import { getAccessToken } from "../../../../../lib/procore/procoreAuth";
 
 export const dynamic = "force-dynamic";
 
@@ -13,28 +13,21 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing company_id or user_id" }, { status: 400 });
   }
 
+  // For now: only check whether we already have a refresh token stored for this embedded user
   const key = `procore:rt:${companyId}:${userId}`;
   const refreshToken = await kv.get<string>(key);
 
   if (!refreshToken) {
-    // This tells the client: "no token yet, run OAuth"
     return NextResponse.json({ ok: false, reason: "no_refresh_token" }, { status: 401 });
   }
 
-  const token = await refreshAccessToken(refreshToken);
+  // TEMP: this proves we can get an access token (your procoreAuth currently uses global KV/env token)
+  // Next step will be refactoring procoreAuth to accept refreshToken/companyId/userId.
+  await getAccessToken();
 
-  // If Procore rotates refresh tokens, update KV
-  if (token.refresh_token && token.refresh_token !== refreshToken) {
-    await kv.set(key, token.refresh_token);
-  }
-
-  // Return access token ONLY to server usage if you can.
-  // If you must return to client, return short-lived token and keep scope minimal.
   return NextResponse.json({
     ok: true,
     companyId,
     userId,
-    expires_in: token.expires_in,
-    access_token: token.access_token,
   });
 }
