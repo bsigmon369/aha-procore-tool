@@ -8,8 +8,8 @@ import { readSessionValue, getSessionCookieName } from "../../../../../lib/sessi
 
 // IMPORTANT: ensure spelling matches Procore exactly.
 // Your requested path includes "00 Preperation" (note spelling).
-const TEMPLATE_PATH = ["09 Submittals", "00 Preperation", "01 AHA's", "01 AHA Template"];
-const COMPLETED_PATH = ["09 Submittals", "00 Preperation", "01 AHA's", "02 Completed AHA's"];
+const TEMPLATE_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "01 AHA Template"];
+const COMPLETED_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "02 Completed AHA's"];
 
 function getIds(searchParams) {
   const projectId = searchParams.get("project_id") || searchParams.get("projectId") || "";
