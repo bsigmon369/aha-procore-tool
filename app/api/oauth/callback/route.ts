@@ -14,8 +14,13 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing code" }, { status: 400 });
   }
 
-  // companyId MUST come from state (not redirect_uri query params)
-  let companyId = process.env.PROCORE_DEFAULT_COMPANY_ID || "";
+  // TEMP SAFE: accept companyId from (1) state, (2) query param, (3) env default
+  // Once everything works, you can remove the query param fallback.
+  let companyId =
+    searchParams.get("company_id") ||
+    process.env.PROCORE_DEFAULT_COMPANY_ID ||
+    "";
+
   if (state) {
     try {
       const decoded = JSON.parse(
@@ -82,8 +87,7 @@ export async function GET(request: Request) {
     await kv.set(key, tokenData.refresh_token);
   }
 
-  // After success, redirect back to your app (recommended vs JSON)
-  // This avoids users refreshing the callback URL and reusing the one-time code.
+  // Redirect back into the app (prevents users from refreshing the callback and reusing the code)
   const redirectTo = `/app?company_id=${encodeURIComponent(
     companyId
   )}&user_id=${encodeURIComponent(String(me.id))}`;
