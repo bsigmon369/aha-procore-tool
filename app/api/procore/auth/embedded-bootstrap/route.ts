@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
-import { getAccessToken } from "@/lib/procoreAuth";
+await getAccessToken(companyId, userId);
 
 export const dynamic = "force-dynamic";
 
