@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Mode = "embedded" | "standalone";
 
 type Context = {
   companyId?: string;
   projectId?: string;
-  userId?: string;
+  userId?: string; // ignored in embedded; kept for backward compat
 };
 
 type Project = {
@@ -21,10 +21,6 @@ type BootstrapState =
   | { status: "needsAuth" }
   | { status: "ready"; me: any };
 
-function isNumericId(v?: string) {
-  return typeof v === "string" && /^[0-9]+$/.test(v);
-}
-
 export default function AppShell({ mode, context }: { mode: Mode; context: Context }) {
   const companyId = context.companyId;
   const projectId = context.projectId;
@@ -32,20 +28,89 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
   const [boot, setBoot] = useState<BootstrapState>({ status: "loading" });
   const [error, setError] = useState<string | null>(null);
 
+  // AHA input/output
   const [sentence, setSentence] = useState("");
   const [ahaJson, setAhaJson] = useState<any>(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // Debug: projects list
   const [showDebugProjects, setShowDebugProjects] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+
+  const oauthInFlightRef = useRef(false);
 
   const returnTo = useMemo(() => {
     const base = `/app?company_id=${encodeURIComponent(companyId || "")}`;
     return projectId ? `${base}&project_id=${encodeURIComponent(projectId)}` : base;
   }, [companyId, projectId]);
 
+  async function startEmbeddedOAuthPopup() {
+    if (!companyId) return;
+
+    if (oauthInFlightRef.current) return;
+    oauthInFlightRef.current = true;
+
+    const popup = window.open(
+      `/api/oauth/start?company_id=${encodeURIComponent(companyId)}&return_to=${encodeURIComponent(returnTo)}`,
+      "aha_procore_oauth",
+      "width=520,height=720"
+    );
+
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      oauthInFlightRef.current = false;
+    };
+
+    const onMessage = async (evt: MessageEvent) => {
+      // Only accept messages from our own origin
+      if (evt.origin !== window.location.origin) return;
+      const data: any = evt.data;
+      if (!data || data.type !== "AHA_OAUTH_DONE") return;
+      if (!data.nonce) return;
+
+      try {
+        // Claim cookie in the iframe context (this is the key step)
+        const claim = await fetch(
+          `/api/oauth/claim?nonce=${encodeURIComponent(data.nonce)}&company_id=${encodeURIComponent(companyId)}`,
+          { cache: "no-store" }
+        );
+
+        const cj = await claim.json().catch(() => null);
+        if (!claim.ok || !cj?.ok) {
+          setError(cj?.error || `OAuth claim failed (${claim.status})`);
+          cleanup();
+          return;
+        }
+
+        // Close popup if still open
+        try {
+          popup?.close();
+        } catch {}
+
+        cleanup();
+
+        // Re-run bootstrap by reloading (simple + reliable)
+        window.location.reload();
+      } catch (e: any) {
+        setError(e?.message || "OAuth claim failed");
+        cleanup();
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+
+    // If popup blocked/closed, reset
+    setTimeout(() => {
+      if (popup && popup.closed) {
+        oauthInFlightRef.current = false;
+        window.removeEventListener("message", onMessage);
+      }
+    }, 1500);
+  }
+
+  // --- Embedded bootstrap ---
   useEffect(() => {
     let cancelled = false;
 
@@ -54,11 +119,8 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       setBoot({ status: "loading" });
 
       if (mode === "embedded") {
-        if (!isNumericId(companyId)) {
-          if (!cancelled) {
-            setError("Embedded launch params were not resolved by Procore (company_id missing/invalid).");
-            setBoot({ status: "needsAuth" });
-          }
+        if (!companyId) {
+          if (!cancelled) setBoot({ status: "needsAuth" });
           return;
         }
 
@@ -74,9 +136,12 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         }
 
         if (bootRes.status === 401) {
-          window.location.href = `/api/oauth/start?company_id=${encodeURIComponent(
-            companyId
-          )}&return_to=${encodeURIComponent(returnTo)}`;
+          // IMPORTANT: Do NOT redirect the iframe to Procore OAuth.
+          // Use popup + claim so cookie is set in iframe context.
+          if (!cancelled) {
+            setBoot({ status: "needsAuth" });
+            startEmbeddedOAuthPopup();
+          }
           return;
         }
 
@@ -88,6 +153,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         return;
       }
 
+      // Standalone mode: user clicks connect
       if (!cancelled) setBoot({ status: "needsAuth" });
     };
 
@@ -98,6 +164,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     };
   }, [mode, companyId, returnTo]);
 
+  // --- Debug: load projects on demand ---
   const loadProjects = async () => {
     if (!companyId) return;
     setProjectsError(null);
@@ -120,6 +187,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     }
   };
 
+  // --- AHA generate ---
   const generateAha = async () => {
     if (!companyId || !projectId) {
       setError("Missing company_id or project_id in embedded context.");
@@ -157,6 +225,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     }
   };
 
+  // --- UI ---
   if (boot.status === "loading") {
     return <div style={{ padding: 40 }}>Loading AHA Builder…</div>;
   }
@@ -186,11 +255,21 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     return (
       <div style={{ padding: 40 }}>
         <h1>AHA Builder</h1>
-        <p style={{ color: "crimson" }}>{error || "Authentication required."}</p>
-        <p>
-          This usually means the Procore embedded app URL parameters were not interpolated (example:
-          company_id=%7B%7Bprocore.company.id%7D%7D).
-        </p>
+        <p>Connecting to Procore…</p>
+        <button
+          onClick={() => startEmbeddedOAuthPopup()}
+          style={{
+            display: "inline-block",
+            padding: "10px 14px",
+            border: "1px solid #ccc",
+            borderRadius: 6,
+            background: "white",
+            cursor: "pointer",
+          }}
+        >
+          Connect Procore
+        </button>
+        {error ? <p style={{ color: "crimson" }}>Error: {error}</p> : null}
       </div>
     );
   }
@@ -229,20 +308,20 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
             width: "100%",
             padding: 10,
             borderRadius: 8,
-            border: "1px solid #ccc",
-            fontFamily: "inherit",
-            resize: "vertical",
+            border: "1px solid #ddd",
           }}
         />
 
-        <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
           <button
+            disabled={isGenerating || !sentence.trim()}
             onClick={generateAha}
-            disabled={isGenerating || !sentence.trim() || !companyId || !projectId}
             style={{
               padding: "10px 14px",
               borderRadius: 8,
-              border: "1px solid #ccc",
+              border: "1px solid #111",
+              background: isGenerating ? "#f5f5f5" : "#111",
+              color: isGenerating ? "#111" : "#fff",
               cursor: isGenerating ? "not-allowed" : "pointer",
             }}
           >
@@ -259,73 +338,73 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
               padding: "10px 14px",
               borderRadius: 8,
               border: "1px solid #ccc",
+              background: "#fff",
               cursor: "pointer",
-              background: "white",
             }}
           >
             Clear
           </button>
+
+          <button
+            onClick={() => setShowDebugProjects((v) => !v)}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 8,
+              border: "1px solid #ccc",
+              background: "#fff",
+              cursor: "pointer",
+            }}
+          >
+            Debug Projects
+          </button>
         </div>
-
-        {ahaJson ? (
-          <div style={{ marginTop: 14 }}>
-            <h4 style={{ marginBottom: 8 }}>Generated (debug JSON)</h4>
-            <pre
-              style={{
-                background: "#fafafa",
-                border: "1px solid #eee",
-                borderRadius: 8,
-                padding: 12,
-                overflowX: "auto",
-                fontSize: 12,
-              }}
-            >
-              {JSON.stringify(ahaJson, null, 2)}
-            </pre>
-          </div>
-        ) : null}
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={showDebugProjects}
-            onChange={(e) => setShowDebugProjects(e.target.checked)}
-          />
-          Debug: show project list
-        </label>
+      {ahaJson ? (
+        <pre
+          style={{
+            marginTop: 16,
+            padding: 14,
+            background: "#f7f7f7",
+            borderRadius: 10,
+            overflowX: "auto",
+          }}
+        >
+          {JSON.stringify(ahaJson, null, 2)}
+        </pre>
+      ) : null}
 
-        {showDebugProjects ? (
-          <div style={{ marginTop: 10 }}>
-            <button
-              onClick={loadProjects}
-              disabled={isLoadingProjects || !companyId}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 8,
-                border: "1px solid #ccc",
-                cursor: "pointer",
-              }}
-            >
-              {isLoadingProjects ? "Loading…" : "Load Projects (sample)"}
-            </button>
+      {showDebugProjects ? (
+        <div style={{ marginTop: 16, padding: 14, border: "1px solid #eee", borderRadius: 10 }}>
+          <h3 style={{ marginTop: 0 }}>Projects (debug)</h3>
+          <button
+            onClick={loadProjects}
+            disabled={isLoadingProjects}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #ccc",
+              background: "#fff",
+              cursor: isLoadingProjects ? "not-allowed" : "pointer",
+            }}
+          >
+            {isLoadingProjects ? "Loading…" : "Load sample projects"}
+          </button>
 
-            {projectsError ? <p style={{ color: "crimson" }}>{projectsError}</p> : null}
+          {projectsError ? <p style={{ color: "crimson" }}>Error: {projectsError}</p> : null}
 
-            {projects.length ? (
-              <ul style={{ marginTop: 10 }}>
-                {projects.map((p) => (
-                  <li key={p.id}>
-                    {(p.project_number ? `${p.project_number} — ` : "")}
-                    {p.name} (#{p.id})
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+          {projects.length ? (
+            <ul>
+              {projects.map((p) => (
+                <li key={p.id}>
+                  {p.project_number ? `${p.project_number} — ` : ""}
+                  {p.name} (ID: {p.id})
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
