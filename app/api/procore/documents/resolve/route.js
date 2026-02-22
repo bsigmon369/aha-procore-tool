@@ -7,7 +7,7 @@ import { resolveFolderWithDocumentsFix } from "../../../../../lib/procoreDocumen
 import { readSessionValue, getSessionCookieName } from "../../../../../lib/session";
 
 // IMPORTANT: ensure spelling matches Procore exactly.
-// Your requested path includes "00 Preperation" (note spelling).
+// Your requested path includes "00 Preparation" (note spelling).
 const TEMPLATE_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "01 AHA Template"];
 const COMPLETED_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "02 Completed AHA's"];
 
