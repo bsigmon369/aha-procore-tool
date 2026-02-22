@@ -40,21 +40,39 @@ function requireSession(companyId) {
 }
 
 async function resolveBoth({ projectId, companyId, userId }) {
-  const templateFolder = await resolveFolderWithDocumentsFix({
-    scope: "project",
-    projectId,
-    companyId,
-    userId,
-    rawSegments: TEMPLATE_PATH,
-  });
+  // Optional hard-coded via env to avoid name-walking every request
+  const TEMPLATE_ID = process.env.PROCORE_AHA_TEMPLATE_FOLDER_ID || "";
+  const COMPLETED_ID = process.env.PROCORE_AHA_COMPLETED_FOLDER_ID || "";
 
-  const completedFolder = await resolveFolderWithDocumentsFix({
-    scope: "project",
-    projectId,
-    companyId,
-    userId,
-    rawSegments: COMPLETED_PATH,
-  });
+  // If both IDs are set, skip API calls entirely
+  if (TEMPLATE_ID && COMPLETED_ID) {
+    return {
+      templateFolder: { id: String(TEMPLATE_ID), name: "01 AHA Template" },
+      completedFolder: { id: String(COMPLETED_ID), name: "02 Completed AHA's" },
+    };
+  }
+
+  // Otherwise resolve by walking paths (fallback)
+  const [templateFolder, completedFolder] = await Promise.all([
+    TEMPLATE_ID
+      ? { id: TEMPLATE_ID, name: "01 AHA Template" }
+      : resolveFolderWithDocumentsFix({
+          scope: "project",
+          projectId,
+          companyId,
+          userId,
+          rawSegments: TEMPLATE_PATH,
+        }),
+    COMPLETED_ID
+      ? { id: COMPLETED_ID, name: "02 Completed AHA's" }
+      : resolveFolderWithDocumentsFix({
+          scope: "project",
+          projectId,
+          companyId,
+          userId,
+          rawSegments: COMPLETED_PATH,
+        }),
+  ]);
 
   return {
     templateFolder: templateFolder ? { id: String(templateFolder.id), name: templateFolder.name } : null,
