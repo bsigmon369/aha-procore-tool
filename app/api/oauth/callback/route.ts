@@ -82,10 +82,15 @@ export async function GET(request: Request) {
   }
 
   // Store refresh token per company + user
-  if (tokenData.refresh_token) {
-    const key = `procore:rt:${companyId}:${me.id}`;
-    await kv.set(key, tokenData.refresh_token);
-  }
+  // Store refresh token per company + user
+if (tokenData.refresh_token) {
+  const userKey = `procore:rt:${companyId}:${me.id}`;
+  await kv.set(userKey, tokenData.refresh_token);
+
+  // ADD THIS fallback:
+  const companyKey = `procore:rt:${companyId}`;
+  await kv.set(companyKey, tokenData.refresh_token);
+}
 
   // Redirect back into the app (prevents users from refreshing the callback and reusing the code)
   const redirectTo = `/app?company_id=${encodeURIComponent(
