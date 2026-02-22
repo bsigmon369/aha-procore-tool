@@ -229,14 +229,14 @@ export async function POST(req: Request) {
           { role: "user", content: user },
         ],
         // Structured Outputs (strict JSON Schema)
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "aha_v1",
-            schema,
-            strict: true,
-          },
-        },
+        text: {
+  format: {
+    type: "json_schema",
+    name: "aha_v1",
+    schema,
+    strict: true,
+  },
+},
         // keep costs predictable
         temperature: 0.2,
       }),
