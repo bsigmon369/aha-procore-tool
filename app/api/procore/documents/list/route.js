@@ -1,19 +1,21 @@
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
-
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { readSessionValue, getSessionCookieName } from "../../../../../lib/session";
 import { procoreFetchSafe } from "../../../../../lib/procoreAuth";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 /**
  * Lists folder contents in Procore Documents for a project.
- * If folderId is omitted, it lists the project root Documents folder contents.
  *
  * Query params supported:
- * - companyId / projectId (current deployed style)
- * - company_id / project_id (preferred)
- * - folderId / folder_id (optional)
+ * - company_id / companyId
+ * - project_id / projectId
+ * - folder_id / folderId (optional; if omitted, lists root)
+ *
+ * Returns:
+ * { ok, folderId, count, items }
  */
 export async function GET(req) {
   try {
@@ -23,13 +25,17 @@ export async function GET(req) {
       searchParams.get("company_id") ||
       searchParams.get("companyId") ||
       process.env.PROCORE_COMPANY_ID ||
+      process.env.PROCORE_DEFAULT_COMPANY_ID ||
       "";
 
     const projectId = searchParams.get("project_id") || searchParams.get("projectId") || "";
     const folderId = searchParams.get("folder_id") || searchParams.get("folderId") || "";
 
     if (!companyId || !projectId) {
-      return NextResponse.json({ ok: false, error: "Missing companyId/company_id or projectId/project_id" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Missing company_id/companyId or project_id/projectId" },
+        { status: 400 }
+      );
     }
 
     const raw = cookies().get(getSessionCookieName())?.value;
@@ -42,27 +48,55 @@ export async function GET(req) {
       return NextResponse.json({ ok: false, error: "Session/company mismatch" }, { status: 401 });
     }
 
-    // Procore documents listing
-    const qs = new URLSearchParams();
-    qs.set("project_id", String(projectId));
-    if (folderId) qs.set("folder_id", String(folderId));
+    // Correct Procore endpoints:
+    // - root:   /rest/v1.0/folders?project_id=...
+    // - folder: /rest/v1.0/folders/{id}?project_id=...
+    const path = folderId
+      ? `/rest/v1.0/folders/${encodeURIComponent(folderId)}?project_id=${encodeURIComponent(projectId)}`
+      : `/rest/v1.0/folders?project_id=${encodeURIComponent(projectId)}`;
 
-    const r = await procoreFetchSafe(`/rest/v1.0/folders?${qs.toString()}`, {}, companyId, session.userId);
+    const r = await procoreFetchSafe(path, { method: "GET" }, companyId, session.userId);
 
     if (!r.ok) {
-      return NextResponse.json({ ok: false, error: "Procore error", details: r }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "Procore error", status: r.status, url: r.url, data: r.data },
+        { status: 500 }
+      );
     }
 
-    // Normalize for easier human scanning
-    const items = Array.isArray(r.data) ? r.data : [];
-    const out = items.map((x) => ({
-      id: x?.id ?? x?.folder_id ?? x?.file_id ?? null,
-      name: x?.name ?? "",
-      isFolder: x?.is_folder ?? (x?.type === "folder") ?? null,
-      type: x?.type ?? null,
-    }));
+    // Procore shapes vary:
+    // - root list can be array or {files:[...]}
+    // - folder show is usually {files:[...]} (mixed files + folders)
+    const payload = r.data;
+    const itemsRaw = Array.isArray(payload?.files)
+      ? payload.files
+      : Array.isArray(payload)
+      ? payload
+      : [];
 
-    return NextResponse.json({ ok: true, count: out.length, items: out });
+    const items = itemsRaw.map((x) => {
+      const isFolder =
+        x?.is_folder === true ||
+        x?.folder === true ||
+        String(x?.type || "").toLowerCase() === "folder";
+
+      return {
+        id: x?.id ?? null,
+        name: x?.name ?? x?.title ?? x?.display_name ?? x?.filename ?? "",
+        type: x?.type ?? (isFolder ? "folder" : "file"),
+        isFolder,
+        // helpful debugging fields:
+        contentType: x?.content_type ?? null,
+        updatedAt: x?.updated_at ?? null,
+      };
+    });
+
+    return NextResponse.json({
+      ok: true,
+      folderId: folderId || null,
+      count: items.length,
+      items,
+    });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
   }
