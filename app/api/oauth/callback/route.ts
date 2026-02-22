@@ -53,7 +53,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Token exchange failed", data: tokenData }, { status: 500 });
   }
 
-  // Fetch /me to resolve Procore user id
   const meRes = await fetch(`${process.env.PROCORE_BASE_URL}/rest/v1.0/me`, {
     headers: {
       Authorization: `Bearer ${tokenData.access_token}`,
@@ -68,27 +67,31 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Failed to fetch /me", data: me }, { status: 500 });
   }
 
-  // Store refresh token per company+user (and company-level last)
   if (tokenData.refresh_token) {
     await kv.set(`procore:rt:${companyId}:${me.id}`, tokenData.refresh_token);
     await kv.set(`procore:rt:${companyId}`, tokenData.refresh_token);
   }
 
-  // Set HttpOnly session cookie (so embedded mode does NOT need user_id in URL)
   const sessionValue = createSessionValue({
     companyId: String(companyId),
     userId: String(me.id),
   });
 
   const res = NextResponse.redirect(new URL(returnTo, request.url));
-  res.cookies.set({
-  name: getSessionCookieName(),
-  value: sessionValue,
-  httpOnly: true,
-  sameSite: "none",
-  secure: true,
-  path: "/",
-  });
+
+  const cookieName = getSessionCookieName();
+  const cookieValue = encodeURIComponent(sessionValue);
+
+  const cookie = [
+    `${cookieName}=${cookieValue}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=None",
+    "Partitioned",
+  ].join("; ");
+
+  res.headers.append("Set-Cookie", cookie);
 
   return res;
 }
