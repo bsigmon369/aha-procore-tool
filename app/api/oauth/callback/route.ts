@@ -82,13 +82,12 @@ export async function GET(request: Request) {
 
   const res = NextResponse.redirect(new URL(returnTo, request.url));
   res.cookies.set({
-    name: getSessionCookieName(),
-    value: sessionValue,
-    httpOnly: true,
--   sameSite: "lax",
-+   sameSite: "none",
-    secure: true,
-    path: "/",
+  name: getSessionCookieName(),
+  value: sessionValue,
+  httpOnly: true,
+  sameSite: "none",
+  secure: true,
+  path: "/",
   });
 
   return res;
