@@ -46,69 +46,73 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     return projectId ? `${base}&project_id=${encodeURIComponent(projectId)}` : base;
   }, [companyId, projectId]);
 
-  async function startEmbeddedOAuthPopup() {
-    if (!companyId) return;
+ async function startEmbeddedOAuthPopup() {
+  // Always derive IDs from the iframe URL first (most reliable inside Procore)
+  const sp = new URLSearchParams(window.location.search);
+  const cid = sp.get("company_id") || companyId || "";
+  const pid = sp.get("project_id") || projectId || "";
 
-    if (oauthInFlightRef.current) return;
-    oauthInFlightRef.current = true;
+  if (!cid) {
+    setError("Missing company_id in embedded URL. Procore did not supply company_id.");
+    return;
+  }
 
-    const popup = window.open(
-      `/api/oauth/start?company_id=${encodeURIComponent(companyId)}&return_to=${encodeURIComponent(returnTo)}`,
-      "aha_procore_oauth",
-      "width=520,height=720"
-    );
+  if (oauthInFlightRef.current) return;
+  oauthInFlightRef.current = true;
 
-    const cleanup = () => {
-      window.removeEventListener("message", onMessage);
-      oauthInFlightRef.current = false;
-    };
+  const rt = `/app?company_id=${encodeURIComponent(cid)}${pid ? `&project_id=${encodeURIComponent(pid)}` : ""}`;
 
-    const onMessage = async (evt: MessageEvent) => {
-      // Only accept messages from our own origin
-      if (evt.origin !== window.location.origin) return;
-      const data: any = evt.data;
-      if (!data || data.type !== "AHA_OAUTH_DONE") return;
-      if (!data.nonce) return;
+  const popup = window.open(
+    `/api/oauth/start?company_id=${encodeURIComponent(cid)}&return_to=${encodeURIComponent(rt)}`,
+    "aha_procore_oauth",
+    "width=520,height=720"
+  );
+
+  const cleanup = () => {
+    window.removeEventListener("message", onMessage);
+    oauthInFlightRef.current = false;
+  };
+
+  const onMessage = async (evt: MessageEvent) => {
+    if (evt.origin !== window.location.origin) return;
+    const data: any = evt.data;
+    if (!data || data.type !== "AHA_OAUTH_DONE") return;
+    if (!data.nonce) return;
+
+    try {
+      const claim = await fetch(
+        `/api/oauth/claim?nonce=${encodeURIComponent(data.nonce)}&company_id=${encodeURIComponent(cid)}`,
+        { cache: "no-store" }
+      );
+
+      const cj = await claim.json().catch(() => null);
+      if (!claim.ok || !cj?.ok) {
+        setError(cj?.error || `OAuth claim failed (${claim.status})`);
+        cleanup();
+        return;
+      }
 
       try {
-        // Claim cookie in the iframe context (this is the key step)
-        const claim = await fetch(
-          `/api/oauth/claim?nonce=${encodeURIComponent(data.nonce)}&company_id=${encodeURIComponent(companyId)}`,
-          { cache: "no-store" }
-        );
+        popup?.close();
+      } catch {}
 
-        const cj = await claim.json().catch(() => null);
-        if (!claim.ok || !cj?.ok) {
-          setError(cj?.error || `OAuth claim failed (${claim.status})`);
-          cleanup();
-          return;
-        }
+      cleanup();
+      window.location.reload();
+    } catch (e: any) {
+      setError(e?.message || "OAuth claim failed");
+      cleanup();
+    }
+  };
 
-        // Close popup if still open
-        try {
-          popup?.close();
-        } catch {}
+  window.addEventListener("message", onMessage);
 
-        cleanup();
-
-        // Re-run bootstrap by reloading (simple + reliable)
-        window.location.reload();
-      } catch (e: any) {
-        setError(e?.message || "OAuth claim failed");
-        cleanup();
-      }
-    };
-
-    window.addEventListener("message", onMessage);
-
-    // If popup blocked/closed, reset
-    setTimeout(() => {
-      if (popup && popup.closed) {
-        oauthInFlightRef.current = false;
-        window.removeEventListener("message", onMessage);
-      }
-    }, 1500);
-  }
+  setTimeout(() => {
+    if (popup && popup.closed) {
+      oauthInFlightRef.current = false;
+      window.removeEventListener("message", onMessage);
+    }
+  }, 1500);
+}
 
   // --- Embedded bootstrap ---
   useEffect(() => {
