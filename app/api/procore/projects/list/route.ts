@@ -18,11 +18,11 @@ export async function GET(request: Request) {
   }
 
   const r = await procoreFetchSafe(
-    `/rest/v1.0/projects`,
-    {},
-    companyId,
-    userId
-  );
+  `/rest/v1.0/projects?company_id=${encodeURIComponent(companyId)}`,
+  {},
+  companyId,
+  userId
+);
 
   const sample =
     Array.isArray(r.data)
