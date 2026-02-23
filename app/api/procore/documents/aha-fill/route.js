@@ -93,11 +93,11 @@ export async function POST(req) {
       return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
     }
     if (String(session.companyId) !== String(company_id)) {
-  return NextResponse.json(
-    { ok: false, error: "Session/company mismatch" },
-    { status: 401 }
-  );
-}
+      return NextResponse.json(
+        { ok: false, error: "Session/company mismatch" },
+        { status: 401 }
+      );
+    }
 
     const { PDFDocument, StandardFonts } = await import("pdf-lib");
 
