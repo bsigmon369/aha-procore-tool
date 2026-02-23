@@ -29,6 +29,14 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  // Last upload details (so you know exactly where it went)
+  const [lastUpload, setLastUpload] = useState<{
+    filename: string;
+    completedFolderId: string;
+    templateFolderId?: string;
+    templateFileId?: string;
+  } | null>(null);
+
   // AHA input/output
   const [sentence, setSentence] = useState("");
   const [ahaJson, setAhaJson] = useState<any>(null);
@@ -127,6 +135,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     const run = async () => {
       setError(null);
       setSuccess(null);
+      setLastUpload(null);
       setBoot({ status: "loading" });
 
       if (mode === "embedded") {
@@ -211,6 +220,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
 
     setError(null);
     setSuccess(null);
+    setLastUpload(null);
     setAhaJson(null);
     setIsGenerating(true);
 
@@ -253,6 +263,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
 
     setError(null);
     setSuccess(null);
+    setLastUpload(null);
     setIsCompleting(true);
 
     try {
@@ -269,6 +280,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       }
 
       const templateFolderId = String(rj.templateFolder.id);
+      const completedFolderId = String(rj?.completedFolder?.id ?? "");
 
       // 2) list template folder contents
       const lr = await fetch(
@@ -318,7 +330,17 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         throw new Error(cj?.error || `Complete failed (${cr.status})`);
       }
 
+      // Record exactly what the server says (helps you locate it)
+      console.log("AHA upload result:", cj);
+
       setSuccess(`Uploaded: ${cj.filename}`);
+
+      setLastUpload({
+        filename: String(cj.filename),
+        completedFolderId: String(cj.completedFolderId || completedFolderId || ""),
+        templateFolderId,
+        templateFileId,
+      });
     } catch (e: any) {
       setError(e?.message || "Complete failed");
     } finally {
@@ -400,13 +422,29 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         </div>
       ) : null}
 
+      {lastUpload ? (
+        <div style={{ marginBottom: 16, padding: 12, border: "1px solid #e5e5e5", borderRadius: 10 }}>
+          <div style={{ marginBottom: 6 }}>
+            <b>Uploaded file:</b> {lastUpload.filename}
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            <b>Completed folder id:</b> {lastUpload.completedFolderId || "(not returned)"}
+          </div>
+          <div style={{ color: "#444" }}>
+            Expected folder: Documents / 09 Submittals / 00 Preparation / 01 AHA&apos;s / 02 Completed AHA&apos;s
+          </div>
+          <div style={{ marginTop: 10, fontSize: 12, color: "#666" }}>
+            <div>Template folder id: {lastUpload.templateFolderId}</div>
+            <div>Template file id: {lastUpload.templateFileId}</div>
+          </div>
+        </div>
+      ) : null}
+
       <div style={{ padding: 14, border: "1px solid #e5e5e5", borderRadius: 10 }}>
         <h3 style={{ marginTop: 0 }}>Describe the activity</h3>
 
         {!projectId ? (
-          <p style={{ color: "crimson", marginTop: 8 }}>
-            This embedded app must be opened inside a Procore Project.
-          </p>
+          <p style={{ color: "crimson", marginTop: 8 }}>This embedded app must be opened inside a Procore Project.</p>
         ) : null}
 
         <p style={{ marginTop: 6, color: "#444" }}>
@@ -464,6 +502,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
               setAhaJson(null);
               setError(null);
               setSuccess(null);
+              setLastUpload(null);
             }}
             style={{
               padding: "10px 14px",
