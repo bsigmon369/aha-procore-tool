@@ -1,149 +1,111 @@
-// app/api/procore/documents/resolve/route.js
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-
-import { resolveFolderWithDocumentsFix } from "../../../../../lib/procoreDocuments";
 import { readSessionValue, getSessionCookieName } from "../../../../../lib/session";
+import { procoreFetchSafe } from "../../../../../lib/procoreAuth";
 
-// IMPORTANT: ensure spelling matches Procore exactly.
-const TEMPLATE_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "01 AHA Template"];
-const COMPLETED_PATH = ["09 Submittals", "00 Preparation", "01 AHA's", "02 Completed AHA's"];
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function getIdsFromSearchParams(searchParams) {
-  const projectId = searchParams.get("project_id") || searchParams.get("projectId") || "";
-  const companyId =
-    searchParams.get("company_id") ||
-    searchParams.get("companyId") ||
-    process.env.PROCORE_COMPANY_ID ||
-    "";
-  return { projectId, companyId };
-}
+// Project-specific folder path (names)
+const PATH_ROOT = ["09 Submittals", "00 Preparation", "01 AHA's"];
+const PATH_TEMPLATE = [...PATH_ROOT, "01 AHA Template"];
+const PATH_COMPLETED = [...PATH_ROOT, "02 Completed AHA's"];
 
-function getIdsFromBody(body) {
-  const projectId = body?.project_id || body?.projectId || "";
-  const companyId =
-    body?.company_id || body?.companyId || process.env.PROCORE_COMPANY_ID || "";
-  return { projectId, companyId };
-}
+async function listFoldersUnderParent({ companyId, userId, projectId, parentId }) {
+  // Procore "List Folders" endpoint is: GET /rest/v1.0/folders?project_id=...&parent_id=...
+  const url =
+    `/rest/v1.0/folders?project_id=${encodeURIComponent(projectId)}` +
+    (parentId ? `&parent_id=${encodeURIComponent(parentId)}` : "");
 
-function requireSession(companyId) {
-  const raw = cookies().get(getSessionCookieName())?.value;
-  const session = readSessionValue(raw);
-
-  if (!session?.companyId || !session?.userId) {
-    return { ok: false, status: 401, error: "Not authenticated" };
-  }
-  if (String(session.companyId) !== String(companyId)) {
-    return { ok: false, status: 401, error: "Session/company mismatch" };
-  }
-  return { ok: true, session };
-}
-
-async function resolveBoth({ projectId, companyId, userId }) {
-  // Optional hard-coded via env to avoid name-walking every request
-  const TEMPLATE_ID = process.env.PROCORE_AHA_TEMPLATE_FOLDER_ID || "";
-  const COMPLETED_ID = process.env.PROCORE_AHA_COMPLETED_FOLDER_ID || "";
-
-  // If both IDs are set, skip API calls entirely
-  if (TEMPLATE_ID && COMPLETED_ID) {
-    return {
-      templateFolder: { id: String(TEMPLATE_ID), name: "01 AHA Template" },
-      completedFolder: { id: String(COMPLETED_ID), name: "02 Completed AHA's" },
-    };
+  const r = await procoreFetchSafe(url, { method: "GET" }, companyId, userId);
+  if (!r.ok) {
+    throw new Error(`List folders failed: ${r.status} ${JSON.stringify(r.data)}`);
   }
 
-  // Otherwise resolve by walking paths (fallback)
-  const [templateFolder, completedFolder] = await Promise.all([
-    TEMPLATE_ID
-      ? { id: TEMPLATE_ID, name: "01 AHA Template" }
-      : resolveFolderWithDocumentsFix({
-          scope: "project",
-          projectId,
-          companyId,
-          userId,
-          rawSegments: TEMPLATE_PATH,
-        }),
-    COMPLETED_ID
-      ? { id: COMPLETED_ID, name: "02 Completed AHA's" }
-      : resolveFolderWithDocumentsFix({
-          scope: "project",
-          projectId,
-          companyId,
-          userId,
-          rawSegments: COMPLETED_PATH,
-        }),
-  ]);
-
-  return {
-    templateFolder: templateFolder ? { id: String(templateFolder.id), name: templateFolder.name } : null,
-    completedFolder: completedFolder ? { id: String(completedFolder.id), name: completedFolder.name } : null,
-  };
+  const rows = Array.isArray(r.data) ? r.data : Array.isArray(r.data?.data) ? r.data.data : [];
+  return rows
+    .filter((x) => x && typeof x === "object")
+    .map((x) => ({
+      id: x.id,
+      name: x.name,
+    }));
 }
 
-export async function GET(req) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const { projectId, companyId } = getIdsFromSearchParams(searchParams);
+async function resolvePathByName({ companyId, userId, projectId, pathSegments }) {
+  // Start from root (parentId undefined)
+  let parentId = null;
 
-    if (!projectId) {
-      return NextResponse.json({ ok: false, error: "Missing project_id" }, { status: 400 });
-    }
-    if (!companyId) {
-      return NextResponse.json({ ok: false, error: "Missing company_id" }, { status: 400 });
+  for (const seg of pathSegments) {
+    const children = await listFoldersUnderParent({ companyId, userId, projectId, parentId });
+    const hit = children.find((c) => String(c.name || "").trim() === seg);
+
+    if (!hit?.id) {
+      const names = children.map((c) => c.name).filter(Boolean).slice(0, 50);
+      throw new Error(
+        `Folder not found: "${seg}" under parent_id=${parentId || "ROOT"} in project_id=${projectId}. ` +
+          `Found: ${names.join(", ")}`
+      );
     }
 
-    const sessionCheck = requireSession(companyId);
-    if (!sessionCheck.ok) {
-      return NextResponse.json({ ok: false, error: sessionCheck.error }, { status: sessionCheck.status });
-    }
-
-    const { templateFolder, completedFolder } = await resolveBoth({
-      projectId,
-      companyId,
-      userId: sessionCheck.session.userId,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      templateFolder,
-      completedFolder,
-      paths: { template: TEMPLATE_PATH, completed: COMPLETED_PATH },
-    });
-  } catch (err) {
-    return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
+    parentId = String(hit.id);
   }
+
+  return { id: String(parentId), name: pathSegments[pathSegments.length - 1] };
 }
 
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { projectId, companyId } = getIdsFromBody(body);
+    const { company_id, project_id } = body;
 
-    if (!projectId) {
-      return NextResponse.json({ ok: false, error: "Missing project_id" }, { status: 400 });
-    }
-    if (!companyId) {
-      return NextResponse.json({ ok: false, error: "Missing company_id" }, { status: 400 });
+    if (!company_id || !project_id) {
+      return NextResponse.json({ ok: false, error: "Missing company_id or project_id" }, { status: 400 });
     }
 
-    const sessionCheck = requireSession(companyId);
-    if (!sessionCheck.ok) {
-      return NextResponse.json({ ok: false, error: sessionCheck.error }, { status: sessionCheck.status });
+    // --- session ---
+    const raw = cookies().get(getSessionCookieName())?.value;
+    const session = readSessionValue(raw);
+
+    if (!session?.companyId || !session?.userId) {
+      return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
+    }
+    if (String(session.companyId) !== String(company_id)) {
+      return NextResponse.json({ ok: false, error: "Session/company mismatch" }, { status: 401 });
     }
 
-    const { templateFolder, completedFolder } = await resolveBoth({
-      projectId,
-      companyId,
-      userId: sessionCheck.session.userId,
+    // --- resolve by folder names (PER PROJECT) ---
+    const templateFolder = await resolvePathByName({
+      companyId: company_id,
+      userId: session.userId,
+      projectId: project_id,
+      pathSegments: PATH_TEMPLATE,
+    });
+
+    const completedFolder = await resolvePathByName({
+      companyId: company_id,
+      userId: session.userId,
+      projectId: project_id,
+      pathSegments: PATH_COMPLETED,
     });
 
     return NextResponse.json({
       ok: true,
       templateFolder,
       completedFolder,
-      paths: { template: TEMPLATE_PATH, completed: COMPLETED_PATH },
+      path: {
+        root: PATH_ROOT,
+        template: PATH_TEMPLATE,
+        completed: PATH_COMPLETED,
+      },
     });
-  } catch (err) {
-    return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Procore error",
+        message: e?.message || String(e),
+      },
+      { status: 500 }
+    );
   }
 }
