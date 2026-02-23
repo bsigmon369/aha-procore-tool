@@ -203,21 +203,37 @@ async function s3PostUpload({ uploadUrl, fields, fileBytes, filename }) {
   }
 }
 
-async function procoreCreateProjectFile({ companyId, userId, projectId, parentFolderId, uploadUuid, filename }) {
-  // Per Procore “Project Folders and Files” patterns: POST /rest/v1.0/files?project_id=...
+async function procoreCreateProjectFile({
+  companyId,
+  userId,
+  projectId,
+  parentFolderId,
+  uploadId,
+  uploadUuid,
+  filename,
+}) {
   const pid = encodeURIComponent(String(projectId));
+
+  // Build file payload with the correct field name
+  const filePayload = {
+    parent_id: String(parentFolderId),
+    name: String(filename),
+  };
+
+  // Prefer numeric upload_id if available
+  if (uploadId) {
+    filePayload.upload_id = uploadId;
+  } else if (uploadUuid) {
+    // Fallback to upload_uuid if id isn't provided
+    filePayload.upload_uuid = String(uploadUuid);
+  }
+
   const r = await procoreFetchSafe(
     `/rest/v1.0/files?project_id=${pid}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        file: {
-          parent_id: String(parentFolderId),
-          upload_id: String(uploadUuid),
-          name: String(filename),
-        },
-      }),
+      body: JSON.stringify({ file: filePayload }),
     },
     companyId,
     userId
@@ -379,7 +395,8 @@ export async function POST(req) {
       userId: session.userId,
       projectId,
       parentFolderId: completedFolderId,
-      uploadUuid: upload.uuid,
+      uploadId: upload.id || upload.upload_id || upload.uploadId || null,
+      uploadUuid: upload.uuid || null,
       filename,
     });
 
