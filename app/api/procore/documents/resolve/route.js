@@ -13,7 +13,6 @@ const PATH_COMPLETED = [...PATH_ROOT, "02 Completed AHA's"];
 
 function jsonError({ stage, status = 500, message, url = null, data = null }) {
   const safeStatus = Number.isFinite(status) ? status : 500;
-
   return NextResponse.json(
     { ok: false, error: "Procore error", stage, message, status: safeStatus, url, data },
     { status: safeStatus >= 400 && safeStatus <= 599 ? safeStatus : 500 }
@@ -54,19 +53,6 @@ async function fetchProject({ companyId, userId, projectId }) {
   return last;
 }
 
-function normalizeFolderRows(payload) {
-  // List folders endpoint shapes:
-  // A) [ {id,name,...}, ... ]
-  // B) { data: [ ... ] }
-  // C) { folders: [ ... ] }  (THIS tenant returns a single root folder object w/ folders[])
-  if (Array.isArray(payload)) return payload;
-  if (payload && typeof payload === "object") {
-    if (Array.isArray(payload.data)) return payload.data;
-    if (Array.isArray(payload.folders)) return payload.folders;
-  }
-  return [];
-}
-
 async function procoreGet({ companyId, userId, url, stage }) {
   const r = await procoreFetchSafe(url, { method: "GET" }, companyId, userId);
   if (!r.ok) {
@@ -80,99 +66,65 @@ async function procoreGet({ companyId, userId, url, stage }) {
   return r.data;
 }
 
+function toChildRows(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .filter((x) => x && typeof x === "object")
+    .map((x) => ({ id: x.id, name: String(x.name || "") }));
+}
+
 /**
- * Critical: determine the numeric "project documents root folder id"
- * for this tenant/project. The API returns a single root folder object.
+ * Tenant behavior:
+ * - /folders?project_id=... returns ONE project-root folder object (id + folders[])
+ * - /folders?project_id=...&parent_id=CHILD_ID incorrectly returns the project-root folder object again
+ * Fix: use /folders/:id?project_id=... to get children reliably.
  */
 async function getProjectRootFolderId({ companyId, userId, projectId }) {
-  const base = `/rest/v1.0/folders?project_id=${encodeURIComponent(String(projectId))}`;
+  const pid = encodeURIComponent(String(projectId));
 
-  const candidates = [
-    { stage: "folders_root_no_parent", url: base },
-    { stage: "folders_root_ROOT", url: `${base}&parent_id=ROOT` },
-    { stage: "folders_root_0", url: `${base}&parent_id=0` },
-  ];
+  // Prefer the simplest call: returns project root folder object on your tenant
+  const rootObj = await procoreGet({
+    companyId,
+    userId,
+    url: `/rest/v1.0/folders?project_id=${pid}`,
+    stage: "folders_root",
+  });
 
-  let lastErr = null;
+  if (rootObj && typeof rootObj === "object" && !Array.isArray(rootObj) && rootObj.id) {
+    return String(rootObj.id);
+  }
 
-  for (const c of candidates) {
-    try {
-      const data = await procoreGet({ companyId, userId, url: c.url, stage: c.stage });
-
-      // If Procore returns a single root folder object, it will have an id and folders/files arrays.
-      if (data && typeof data === "object" && !Array.isArray(data) && data.id) {
-        return String(data.id);
-      }
-
-      // If it returns an array, take the first root-like folder.
-      if (Array.isArray(data) && data.length > 0 && data[0]?.id) {
-        return String(data[0].id);
-      }
-
-      // If it returns { data: [...] }
-      if (data && typeof data === "object" && Array.isArray(data.data) && data.data[0]?.id) {
-        return String(data.data[0].id);
-      }
-
-      // Otherwise try next candidate
-    } catch (e) {
-      lastErr = e;
-    }
+  // Fallbacks (defensive)
+  if (Array.isArray(rootObj) && rootObj[0]?.id) return String(rootObj[0].id);
+  if (rootObj && typeof rootObj === "object" && Array.isArray(rootObj.data) && rootObj.data[0]?.id) {
+    return String(rootObj.data[0].id);
   }
 
   throw Object.assign(new Error("Unable to determine project root folder id"), {
     stage: "root_anchor",
-    status: lastErr?.status || 500,
-    url: lastErr?.url || null,
-    data: lastErr?.data || null,
+    status: 500,
+    url: null,
+    data: rootObj,
   });
 }
 
 async function listChildFolders({ companyId, userId, projectId, parentId }) {
   const pid = encodeURIComponent(String(projectId));
-  const par = String(parentId);
+  const fid = encodeURIComponent(String(parentId));
 
-  // 1) Try the "list by parent_id" endpoint first
-  const listUrl = `/rest/v1.0/folders?project_id=${pid}&parent_id=${encodeURIComponent(par)}`;
-  const listData = await procoreGet({ companyId, userId, url: listUrl, stage: "list_folders" });
+  // Reliable: show folder, read its .folders children
+  const folderObj = await procoreGet({
+    companyId,
+    userId,
+    url: `/rest/v1.0/folders/${fid}?project_id=${pid}`,
+    stage: "show_folder",
+  });
 
-  // Helper to turn folder objects into {id,name}
-  const toRows = (arr) =>
-    (Array.isArray(arr) ? arr : [])
-      .filter((x) => x && typeof x === "object")
-      .map((x) => ({ id: x.id, name: String(x.name || "") }));
-
-  // Normalize common shapes
-  const normalized = normalizeFolderRows(listData);
-
-  // If Procore returns a single folder object with folders[], use it
-  // BUT ONLY if it's actually the folder we asked for.
-  if (listData && typeof listData === "object" && !Array.isArray(listData)) {
-    const returnedId = listData.id != null ? String(listData.id) : null;
-
-    // If we got the parent folder back, children are in listData.folders
-    if (returnedId === par && Array.isArray(listData.folders)) {
-      return toRows(listData.folders);
-    }
-
-    // If we got some other folder (often project root), ignore it and fall back
-    // (this is the bug you’re hitting)
-  }
-
-  // If the list endpoint returned a normal array of children, use it
-  if (Array.isArray(normalized) && normalized.length > 0) {
-    return toRows(normalized);
-  }
-
-  // 2) Fallback: "show folder" endpoint (more reliable for this tenant)
-  const showUrl = `/rest/v1.0/folders/${encodeURIComponent(par)}?project_id=${pid}`;
-  const folderObj = await procoreGet({ companyId, userId, url: showUrl, stage: "show_folder" });
-
+  // Most important line: children come from folderObj.folders
   if (folderObj && typeof folderObj === "object" && Array.isArray(folderObj.folders)) {
-    return toRows(folderObj.folders);
+    return toChildRows(folderObj.folders);
   }
 
-  // Last resort: nothing visible
+  // Defensive fallback (shouldn't happen on your tenant)
   return [];
 }
 
@@ -239,7 +191,7 @@ export async function POST(req) {
       });
     }
 
-    // keep this for auth sanity; not used for docs root
+    // Sanity check auth/token still valid for project
     const projResp = await fetchProject({ companyId, userId: session.userId, projectId });
     if (!projResp?.ok) {
       return jsonError({
@@ -251,7 +203,6 @@ export async function POST(req) {
       });
     }
 
-    // Key fix: numeric root folder id (project root)
     const projectRootFolderId = await getProjectRootFolderId({
       companyId,
       userId: session.userId,
