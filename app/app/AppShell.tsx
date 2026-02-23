@@ -274,16 +274,15 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       const files = lj.items.filter((x: any) => !x?.isFolder && typeof x?.name === "string");
       const pdfs = files.filter((x: any) => x.name.toLowerCase().endsWith(".pdf"));
 
-      const preferred =
-        pdfs.find((x: any) => x.name.toLowerCase().includes("template")) ||
-        pdfs.find((x: any) => x.name.toLowerCase().includes("aha")) ||
-        pdfs[0];
-
-      if (!preferred?.id) {
-        throw new Error("No PDF template found in: 01 AHA Template");
+      if (pdfs.length === 0) {
+        throw new Error("No PDF found in: 01 AHA Template");
       }
-
-      const templateFileId = String(preferred.id);
+      if (pdfs.length > 1) {
+        const names = pdfs.map((p: any) => p.name).join(", ");
+        throw new Error(`Multiple PDFs found in 01 AHA Template. Leave only one. Found: ${names}`);
+      }
+      
+      const templateFileId = String(pdfs[0].id);
 
       // 4) fill + upload into "02 Completed AHA's"
       const cr = await fetch("/api/procore/documents/aha-complete", {
