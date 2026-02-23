@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { readSessionValue, getSessionCookieName } from "../../../../../lib/session";
+import { procoreFetchSafe } from "../../../../../lib/procoreAuth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -74,6 +75,170 @@ function safeSetText(form, name, value, opts = {}) {
   } catch {}
 }
 
+function normalizeName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildProjectLocationTwoLine(project) {
+  const jobNumber = String(project?.project_number || "").trim();
+  const city = String(project?.city || "").trim();
+  const st = String(project?.state_code || "").trim();
+  const cityState = city && st ? `${city}, ${st}` : city || st;
+  if (jobNumber && cityState) return `${jobNumber}\n${cityState}`;
+  return jobNumber || cityState || "";
+}
+
+function getFirstWidgetRect(textField) {
+  try {
+    const widgets = textField?.acroField?.getWidgets?.();
+    if (!widgets || !widgets.length) return null;
+    const r = widgets[0].getRectangle();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  } catch {
+    return null;
+  }
+}
+
+function wrapWordsToWidth(font, text, fontSize, maxWidth) {
+  const words = String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const widthOf = (s) => {
+    try {
+      return font.widthOfTextAtSize(s, fontSize);
+    } catch {
+      return s.length * fontSize * 0.5;
+    }
+  };
+
+  const lines = [];
+  let line = "";
+
+  for (const w of words) {
+    const candidate = line ? `${line} ${w}` : w;
+    if (widthOf(candidate) <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+
+    if (line) lines.push(line);
+
+    // If a single word is too long, hard-break it.
+    if (widthOf(w) > maxWidth) {
+      let chunk = "";
+      for (const ch of w) {
+        const cand2 = chunk + ch;
+        if (widthOf(cand2) <= maxWidth) {
+          chunk = cand2;
+        } else {
+          if (chunk) lines.push(chunk);
+          chunk = ch;
+        }
+      }
+      line = chunk;
+    } else {
+      line = w;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function ellipsizeToWidth(font, text, fontSize, maxWidth) {
+  const t = String(text || "").trim();
+  const ell = "…";
+
+  const widthOf = (s) => {
+    try {
+      return font.widthOfTextAtSize(s, fontSize);
+    } catch {
+      return s.length * fontSize * 0.5;
+    }
+  };
+
+  if (!t) return "";
+  if (widthOf(t) <= maxWidth) return t;
+
+  let out = t;
+  while (out.length > 0 && widthOf(out + ell) > maxWidth) {
+    out = out.slice(0, -1);
+  }
+  return (out.trimEnd() || "") + ell;
+}
+
+function safeSetWrappedText({ form, fieldName, value, font, maxFontSize = 9, minFontSize = 8, padding = 2 }) {
+  try {
+    const field = form.getTextField(fieldName);
+    try {
+      field.enableMultiline();
+    } catch {}
+
+    const rect = getFirstWidgetRect(field);
+    if (!rect) {
+      field.setText(cleanMulti(value));
+      try {
+        field.setFontSize(maxFontSize);
+      } catch {}
+      return;
+    }
+
+    const maxWidth = Math.max(1, rect.width - padding * 2);
+    const maxHeight = Math.max(1, rect.height - padding * 2);
+
+    const raw = cleanMulti(value);
+    const paragraphs = raw ? raw.split(/\n{2,}/) : [""];
+
+    for (let size = maxFontSize; size >= minFontSize; size -= 0.5) {
+      const lineHeight = size * 1.15;
+      const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
+
+      let lines = [];
+      for (let p = 0; p < paragraphs.length; p++) {
+        const para = paragraphs[p];
+        const paraLines = wrapWordsToWidth(font, para, size, maxWidth);
+        lines.push(...paraLines);
+        if (p < paragraphs.length - 1) lines.push("");
+      }
+
+      if (lines.length <= maxLines) {
+        try {
+          field.setFontSize(size);
+        } catch {}
+        field.setText(lines.join("\n"));
+        return;
+      }
+    }
+
+    // Truncate at min font size
+    const size = minFontSize;
+    const lineHeight = size * 1.15;
+    const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
+
+    let lines = [];
+    for (let p = 0; p < paragraphs.length; p++) {
+      const para = paragraphs[p];
+      const paraLines = wrapWordsToWidth(font, para, size, maxWidth);
+      lines.push(...paraLines);
+      if (p < paragraphs.length - 1) lines.push("");
+    }
+
+    lines = lines.slice(0, maxLines);
+    lines[maxLines - 1] = ellipsizeToWidth(font, lines[maxLines - 1], size, maxWidth);
+
+    try {
+      field.setFontSize(size);
+    } catch {}
+    field.setText(lines.join("\n"));
+  } catch {}
+}
+
 export async function POST(req) {
   try {
     const body = await req.json();
@@ -93,10 +258,7 @@ export async function POST(req) {
       return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
     }
     if (String(session.companyId) !== String(company_id)) {
-      return NextResponse.json(
-        { ok: false, error: "Session/company mismatch" },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: "Session/company mismatch" }, { status: 401 });
     }
 
     const { PDFDocument, StandardFonts } = await import("pdf-lib");
@@ -119,31 +281,59 @@ export async function POST(req) {
       form.updateFieldAppearances(font);
     } catch {}
 
-    // ===== HEADER (tight single-line boxes) =====
+    // ===== HEADER (formatting punch list rules) =====
+    // A) Project Location: Job Number + City/State from Procore project
+    let projectLocation = "";
+    try {
+      const proj = await procoreFetchSafe(
+        `/rest/v1.0/projects/${project_id}?company_id=${encodeURIComponent(String(company_id))}`,
+        { method: "GET" },
+        String(company_id),
+        String(session.userId)
+      );
+      if (proj.ok) projectLocation = buildProjectLocationTwoLine(proj.data);
+    } catch {}
+
+    // B) Contractor: constant
+    const contractor = "Sessa Sheet Metal Contractors, Inc.";
+
+    // C) Prepared By: keep existing behavior (no Procore user lookup yet)
+    const preparedBy = String(aha.header?.preparedByNameTitle || "").trim();
+
+    // D) Reviewed By: Pat unless Prepared By is Pat, then Bobby
+    const preparedNorm = normalizeName(preparedBy);
+    const isPatPrepared = preparedNorm === "pat lowrie" || preparedNorm.startsWith("pat lowrie ");
+    const reviewedBy = isPatPrepared ? "Bobby Sigmon" : "Pat Lowrie";
+
     safeSetText(form, "ActivityWork Task", clampOneLine(aha.header?.activityWorkTask, 60), { fontSize: 10 });
-    safeSetText(form, "Project Location", clampOneLine(aha.header?.projectLocation, 40), { fontSize: 10 });
-    safeSetText(form, "Contractor", clampOneLine(aha.header?.contractor, 28), { fontSize: 10 });
+    safeSetWrappedText({
+      form,
+      fieldName: "Project Location",
+      value: projectLocation || aha.header?.projectLocation || "",
+      font,
+      maxFontSize: 10,
+      minFontSize: 9,
+    });
+    safeSetText(form, "Contractor", clampOneLine(contractor, 40), { fontSize: 10 });
     safeSetText(form, "Date Prepared", clampOneLine(aha.header?.datePrepared, 12), { fontSize: 10 });
-    safeSetText(form, "Prepared by NameTitle", clampOneLine(aha.header?.preparedByNameTitle, 38), { fontSize: 10 });
-    safeSetText(form, "Reviewed by NameTitle", clampOneLine(aha.header?.reviewedByNameTitle, 38), { fontSize: 10 });
+    safeSetText(form, "Prepared by NameTitle", clampOneLine(preparedBy, 38), { fontSize: 10 });
+    safeSetText(form, "Reviewed by NameTitle", clampOneLine(reviewedBy, 38), { fontSize: 10 });
 
     // Notes is multiline; keep it sane and small font
-    safeSetText(
-      form,
-      "Notes Field Notes Review Comments",
-      clampMulti(aha.header?.notes, 240),
-      { multiline: true, fontSize: 9 }
-    );
+    safeSetText(form, "Notes Field Notes Review Comments", clampMulti(aha.header?.notes, 240), {
+      multiline: true,
+      fontSize: 9,
+    });
 
-    // ===== JOB STEPS (Rows 1–5) =====
+    // ===== JOB STEPS (Rows 1–5) — wrap cleanly inside boxes =====
     const rows = Array.isArray(aha.jobStepRows) ? aha.jobStepRows : [];
     for (let i = 0; i < 5; i++) {
       const row = rows[i] || {};
       const index = i + 1;
 
-      safeSetText(form, `Job StepsRow${index}`, clampOneLine(row.step, 55), { fontSize: 9 });
-      safeSetText(form, `HazardsRow${index}`, clampOneLine(row.hazards, 55), { fontSize: 9 });
-      safeSetText(form, `ControlsRow${index}`, clampOneLine(row.controls, 85), { fontSize: 9 });
+      safeSetWrappedText({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 8 });
+      safeSetWrappedText({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 8 });
+      safeSetWrappedText({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 8 });
       safeSetText(form, `RACRow${index}`, clampOneLine(row.rac, 2), { fontSize: 9 });
     }
 
