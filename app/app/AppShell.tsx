@@ -27,6 +27,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
 
   const [boot, setBoot] = useState<BootstrapState>({ status: "loading" });
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   // AHA input/output
   const [sentence, setSentence] = useState("");
@@ -38,6 +39,8 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+
+  // Complete/upload
   const [isCompleting, setIsCompleting] = useState(false);
 
   const oauthInFlightRef = useRef(false);
@@ -47,73 +50,75 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     return projectId ? `${base}&project_id=${encodeURIComponent(projectId)}` : base;
   }, [companyId, projectId]);
 
- async function startEmbeddedOAuthPopup() {
-  // Always derive IDs from the iframe URL first (most reliable inside Procore)
-  const sp = new URLSearchParams(window.location.search);
-  const cid = sp.get("company_id") || companyId || "";
-  const pid = sp.get("project_id") || projectId || "";
+  async function startEmbeddedOAuthPopup() {
+    // Always derive IDs from the iframe URL first (most reliable inside Procore)
+    const sp = new URLSearchParams(window.location.search);
+    const cid = sp.get("company_id") || companyId || "";
+    const pid = sp.get("project_id") || projectId || "";
 
-  if (!cid) {
-    setError("Missing company_id in embedded URL. Procore did not supply company_id.");
-    return;
-  }
+    if (!cid) {
+      setError("Missing company_id in embedded URL. Procore did not supply company_id.");
+      return;
+    }
 
-  if (oauthInFlightRef.current) return;
-  oauthInFlightRef.current = true;
+    if (oauthInFlightRef.current) return;
+    oauthInFlightRef.current = true;
 
-  const rt = `/app?company_id=${encodeURIComponent(cid)}${pid ? `&project_id=${encodeURIComponent(pid)}` : ""}`;
+    const rt = `/app?company_id=${encodeURIComponent(cid)}${
+      pid ? `&project_id=${encodeURIComponent(pid)}` : ""
+    }`;
 
-  const popup = window.open(
-    `/api/oauth/start?company_id=${encodeURIComponent(cid)}&return_to=${encodeURIComponent(rt)}`,
-    "aha_procore_oauth",
-    "width=520,height=720"
-  );
+    const popup = window.open(
+      `/api/oauth/start?company_id=${encodeURIComponent(cid)}&return_to=${encodeURIComponent(rt)}`,
+      "aha_procore_oauth",
+      "width=520,height=720"
+    );
 
-  const cleanup = () => {
-    window.removeEventListener("message", onMessage);
-    oauthInFlightRef.current = false;
-  };
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      oauthInFlightRef.current = false;
+    };
 
-  const onMessage = async (evt: MessageEvent) => {
-    if (evt.origin !== window.location.origin) return;
-    const data: any = evt.data;
-    if (!data || data.type !== "AHA_OAUTH_DONE") return;
-    if (!data.nonce) return;
-
-    try {
-      const claim = await fetch(
-        `/api/oauth/claim?nonce=${encodeURIComponent(data.nonce)}&company_id=${encodeURIComponent(cid)}`,
-        { cache: "no-store" }
-      );
-
-      const cj = await claim.json().catch(() => null);
-      if (!claim.ok || !cj?.ok) {
-        setError(cj?.error || `OAuth claim failed (${claim.status})`);
-        cleanup();
-        return;
-      }
+    const onMessage = async (evt: MessageEvent) => {
+      if (evt.origin !== window.location.origin) return;
+      const data: any = evt.data;
+      if (!data || data.type !== "AHA_OAUTH_DONE") return;
+      if (!data.nonce) return;
 
       try {
-        popup?.close();
-      } catch {}
+        const claim = await fetch(
+          `/api/oauth/claim?nonce=${encodeURIComponent(data.nonce)}&company_id=${encodeURIComponent(cid)}`,
+          { cache: "no-store" }
+        );
 
-      cleanup();
-      window.location.reload();
-    } catch (e: any) {
-      setError(e?.message || "OAuth claim failed");
-      cleanup();
-    }
-  };
+        const cj = await claim.json().catch(() => null);
+        if (!claim.ok || !cj?.ok) {
+          setError(cj?.error || `OAuth claim failed (${claim.status})`);
+          cleanup();
+          return;
+        }
 
-  window.addEventListener("message", onMessage);
+        try {
+          popup?.close();
+        } catch {}
 
-  setTimeout(() => {
-    if (popup && popup.closed) {
-      oauthInFlightRef.current = false;
-      window.removeEventListener("message", onMessage);
-    }
-  }, 1500);
-}
+        cleanup();
+        window.location.reload();
+      } catch (e: any) {
+        setError(e?.message || "OAuth claim failed");
+        cleanup();
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+
+    setTimeout(() => {
+      if (popup && popup.closed) {
+        oauthInFlightRef.current = false;
+        window.removeEventListener("message", onMessage);
+      }
+    }, 1500);
+  }
 
   // --- Embedded bootstrap ---
   useEffect(() => {
@@ -121,11 +126,16 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
 
     const run = async () => {
       setError(null);
+      setSuccess(null);
       setBoot({ status: "loading" });
 
       if (mode === "embedded") {
+        // If Procore didn't provide a company_id, this isn't an auth issue—it's a bad embed context.
         if (!companyId) {
-          if (!cancelled) setBoot({ status: "needsAuth" });
+          if (!cancelled) {
+            setError("Missing company_id in embedded context (Procore did not supply it).");
+            setBoot({ status: "needsAuth" });
+          }
           return;
         }
 
@@ -145,7 +155,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
           // Use popup + claim so cookie is set in iframe context.
           if (!cancelled) {
             setBoot({ status: "needsAuth" });
-            startEmbeddedOAuthPopup();
+            if (!oauthInFlightRef.current) startEmbeddedOAuthPopup();
           }
           return;
         }
@@ -175,10 +185,9 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     setProjectsError(null);
     setIsLoadingProjects(true);
     try {
-      const pr = await fetch(
-        `/api/procore/projects/list?company_id=${encodeURIComponent(companyId)}`,
-        { cache: "no-store" }
-      );
+      const pr = await fetch(`/api/procore/projects/list?company_id=${encodeURIComponent(companyId)}`, {
+        cache: "no-store",
+      });
       const pj = await pr.json().catch(() => null);
       if (pj?.ok && Array.isArray(pj.sample)) {
         setProjects(pj.sample);
@@ -201,6 +210,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     if (!sentence.trim()) return;
 
     setError(null);
+    setSuccess(null);
     setAhaJson(null);
     setIsGenerating(true);
 
@@ -229,7 +239,8 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       setIsGenerating(false);
     }
   };
-  // --- AHA complete: resolve → list template folder → pick template pdf → fill+upload ---
+
+  // --- AHA complete: resolve → list template folder → single PDF → fill+upload ---
   const completeAha = async () => {
     if (!companyId || !projectId) {
       setError("Missing company_id or project_id in embedded context.");
@@ -241,6 +252,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
     }
 
     setError(null);
+    setSuccess(null);
     setIsCompleting(true);
 
     try {
@@ -270,7 +282,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         throw new Error(lj?.error || `List failed (${lr.status})`);
       }
 
-      // 3) choose the PDF template file in "01 AHA Template"
+      // 3) enforce exactly one PDF in "01 AHA Template"
       const files = lj.items.filter((x: any) => !x?.isFolder && typeof x?.name === "string");
       const pdfs = files.filter((x: any) => x.name.toLowerCase().endsWith(".pdf"));
 
@@ -279,9 +291,12 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       }
       if (pdfs.length > 1) {
         const names = pdfs.map((p: any) => p.name).join(", ");
-        throw new Error(`Multiple PDFs found in 01 AHA Template. Leave only one. Found: ${names}`);
+        throw new Error(
+          `Multiple PDFs found in 01 AHA Template (Documents/09 Submittals/00 Preparation/01 AHA's/01 AHA Template). ` +
+            `Leave only one PDF. Found: ${names}`
+        );
       }
-      
+
       const templateFileId = String(pdfs[0].id);
 
       // 4) fill + upload into "02 Completed AHA's"
@@ -303,15 +318,14 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         throw new Error(cj?.error || `Complete failed (${cr.status})`);
       }
 
-      // optional: surface success somewhere
-      // setError(null);
-      // alert(`Uploaded: ${cj.filename}`);
+      setSuccess(`Uploaded: ${cj.filename}`);
     } catch (e: any) {
       setError(e?.message || "Complete failed");
     } finally {
       setIsCompleting(false);
     }
   };
+
   // --- UI ---
   if (boot.status === "loading") {
     return <div style={{ padding: 40 }}>Loading AHA Builder…</div>;
@@ -380,13 +394,21 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         </div>
       ) : null}
 
+      {success ? (
+        <div style={{ marginBottom: 16 }}>
+          <p style={{ color: "green" }}>{success}</p>
+        </div>
+      ) : null}
+
       <div style={{ padding: 14, border: "1px solid #e5e5e5", borderRadius: 10 }}>
         <h3 style={{ marginTop: 0 }}>Describe the activity</h3>
+
         {!projectId ? (
-      <p style={{ color: "crimson", marginTop: 8 }}>
-        This embedded app must be opened inside a Procore Project.
-      </p>
-    ) : null}
+          <p style={{ color: "crimson", marginTop: 8 }}>
+            This embedded app must be opened inside a Procore Project.
+          </p>
+        ) : null}
+
         <p style={{ marginTop: 6, color: "#444" }}>
           Type one sentence. We’ll generate a structured AHA and (next) fill & upload the PDF.
         </p>
@@ -407,7 +429,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
 
         <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
           <button
-            disabled={isGenerating || !sentence.trim()}
+            disabled={isGenerating || !sentence.trim() || !companyId || !projectId}
             onClick={generateAha}
             style={{
               padding: "10px 14px",
@@ -420,8 +442,9 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
           >
             {isGenerating ? "Generating…" : "Generate AHA"}
           </button>
+
           <button
-            disabled={isCompleting || !ahaJson}
+            disabled={isCompleting || !ahaJson || !companyId || !projectId}
             onClick={completeAha}
             style={{
               padding: "10px 14px",
@@ -431,15 +454,16 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
               color: "#111",
               cursor: isCompleting || !ahaJson ? "not-allowed" : "pointer",
             }}
-            >
+          >
             {isCompleting ? "Uploading…" : "Fill & Upload PDF"}
           </button>
-          
+
           <button
             onClick={() => {
               setSentence("");
               setAhaJson(null);
               setError(null);
+              setSuccess(null);
             }}
             style={{
               padding: "10px 14px",
