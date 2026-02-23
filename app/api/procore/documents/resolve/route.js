@@ -63,22 +63,13 @@ async function fetchProject({ companyId, userId, projectId }) {
   return last;
 }
 
-function extractDocsRootId(project) {
-  return (
-    project?.root_folder_id ??
-    project?.documents_folder_id ??
-    project?.root_document_folder_id ??
-    project?.document_root_folder_id ??
-    null
-  );
-}
-
 async function listChildFolders({ companyId, userId, projectId, parentId }) {
   const url =
     `/rest/v1.0/folders?project_id=${encodeURIComponent(String(projectId))}` +
     `&parent_id=${encodeURIComponent(String(parentId))}`;
 
   const r = await procoreFetchSafe(url, { method: "GET" }, companyId, userId);
+
   if (!r.ok) {
     throw Object.assign(new Error("List folders failed"), {
       stage: "list_folders",
@@ -95,11 +86,13 @@ async function listChildFolders({ companyId, userId, projectId, parentId }) {
 }
 
 function findFolderByName(children, targetName) {
-  const exact = children.find((c) => c.name.trim() === targetName);
+  const targetTrim = String(targetName || "").trim();
+
+  const exact = children.find((c) => String(c.name || "").trim() === targetTrim);
   if (exact) return exact;
 
-  const t = targetName.trim().toLowerCase();
-  return children.find((c) => c.name.trim().toLowerCase() === t) || null;
+  const t = targetTrim.toLowerCase();
+  return children.find((c) => String(c.name || "").trim().toLowerCase() === t) || null;
 }
 
 async function resolvePath({ companyId, userId, projectId, startParentId, pathSegments }) {
@@ -141,9 +134,11 @@ export async function POST(req) {
     }
 
     const session = getSession();
+
     if (!session?.companyId || !session?.userId) {
       return jsonError({ stage: "auth", status: 401, message: "Not authenticated" });
     }
+
     if (String(session.companyId) !== String(companyId)) {
       return jsonError({
         stage: "auth",
@@ -153,7 +148,9 @@ export async function POST(req) {
       });
     }
 
+    // Keep this to validate auth/session is still good (but do NOT rely on project payload for docs root)
     const projResp = await fetchProject({ companyId, userId: session.userId, projectId });
+
     if (!projResp?.ok) {
       return jsonError({
         stage: projResp?.stage || "project_fetch",
@@ -164,16 +161,17 @@ export async function POST(req) {
       });
     }
 
-    const docsRootId = extractDocsRootId(projResp.data);
-    if (!docsRootId) {
-      return jsonError({
-        stage: "project_docs_root_missing",
-        status: 500,
-        message: "Project missing documents root folder id",
-        url: projResp.url || null,
-        data: projResp.data || null,
-      });
-    }
+    // Procore Documents root is virtual. Use ROOT for consistent folder walking.
+    const docsRootId = "ROOT";
+
+    // TEMP DEBUG (safe): helps confirm the project has expected top-level structure
+    const top = await listChildFolders({
+      companyId,
+      userId: session.userId,
+      projectId,
+      parentId: "ROOT",
+    });
+    console.log("[resolve] project", String(projectId), "top-level folders:", top.map((x) => x.name));
 
     const templateFolderId = await resolvePath({
       companyId,
@@ -193,7 +191,7 @@ export async function POST(req) {
 
     return NextResponse.json({
       ok: true,
-      docsRootId: String(docsRootId),
+      docsRootId,
       templateFolder: { id: String(templateFolderId), path: PATH_TEMPLATE },
       completedFolder: { id: String(completedFolderId), path: PATH_COMPLETED },
     });
