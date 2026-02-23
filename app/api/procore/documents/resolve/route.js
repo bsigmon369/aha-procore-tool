@@ -116,19 +116,31 @@ async function listChildFolders({ companyId, userId, projectId, parentId }) {
       .filter((x) => x && typeof x === "object")
       .map((x) => ({ id: x.id, name: String(x.name || "") }));
 
+  const url = `/rest/v1.0/folders/${fid}?project_id=${pid}`;
+
   const folderObj = await procoreGet({
     companyId,
     userId,
-    url: `/rest/v1.0/folders/${fid}?project_id=${pid}`,
+    url,
     stage: "show_folder",
   });
 
-  console.log("[resolve] show_folder children", {
-    parentId: String(parentId),
-    childNames: (folderObj?.folders || []).map((f) => f?.name).filter(Boolean).slice(0, 30),
-  });
+  if (!folderObj || typeof folderObj !== "object") {
+    throw Object.assign(new Error("Folder show returned invalid payload"), {
+      stage: "show_folder_invalid",
+      status: 502,
+      url,
+      data: folderObj,
+    });
+  }
 
-  if (folderObj && typeof folderObj === "object" && Array.isArray(folderObj.folders)) {
+  // TEMP DEBUG (remove after stabilization)
+  // console.log("[resolve] show_folder children", {
+  //   parentId: String(parentId),
+  //   childNames: (folderObj?.folders || []).map((f) => f?.name).filter(Boolean).slice(0, 30),
+  // });
+
+  if (Array.isArray(folderObj.folders)) {
     return toRows(folderObj.folders);
   }
 
