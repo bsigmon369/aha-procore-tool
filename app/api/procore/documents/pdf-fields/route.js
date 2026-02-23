@@ -50,21 +50,30 @@ export async function GET(req) {
       return NextResponse.json({ ok: false, error: "Session/company mismatch" }, { status: 401 });
     }
 
+    const { PDFDocument } = await import("pdf-lib");
+
     const cookieHeader = req.headers.get("cookie") || "";
     const pdfBytes = await fetchPdfBytes({ origin, companyId, projectId, fileId, cookieHeader });
 
-    // Cheap “is there a form?” detection
-    // Search for common tokens:
-    const sample = Buffer.from(pdfBytes.slice(0, Math.min(pdfBytes.length, 2_000_000))).toString("latin1");
-    const hasAcroForm = sample.includes("/AcroForm");
-    const hasXfa = sample.includes("/XFA");
+    const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+
+    const out = fields.map((f) => {
+      const type = f.constructor?.name || "UnknownField";
+      let name = "";
+      try {
+        name = f.getName();
+      } catch {
+        name = "";
+      }
+      return { name, type };
+    });
 
     return NextResponse.json({
       ok: true,
-      bytes: pdfBytes.length,
-      hasAcroForm,
-      hasXfa,
-      note: "If hasAcroForm/hasXfa is false, we must do coordinate overlay filling.",
+      fieldCount: out.length,
+      fields: out,
     });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
