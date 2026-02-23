@@ -111,7 +111,11 @@ async function listChildFolders({ companyId, userId, projectId, parentId }) {
   const pid = encodeURIComponent(String(projectId));
   const fid = encodeURIComponent(String(parentId));
 
-  // Reliable: show folder, read its .folders children
+  const toRows = (arr) =>
+    (Array.isArray(arr) ? arr : [])
+      .filter((x) => x && typeof x === "object")
+      .map((x) => ({ id: x.id, name: String(x.name || "") }));
+
   const folderObj = await procoreGet({
     companyId,
     userId,
@@ -119,12 +123,15 @@ async function listChildFolders({ companyId, userId, projectId, parentId }) {
     stage: "show_folder",
   });
 
-  // Most important line: children come from folderObj.folders
+  console.log("[resolve] show_folder children", {
+    parentId: String(parentId),
+    childNames: (folderObj?.folders || []).map((f) => f?.name).filter(Boolean).slice(0, 30),
+  });
+
   if (folderObj && typeof folderObj === "object" && Array.isArray(folderObj.folders)) {
-    return toChildRows(folderObj.folders);
+    return toRows(folderObj.folders);
   }
 
-  // Defensive fallback (shouldn't happen on your tenant)
   return [];
 }
 
