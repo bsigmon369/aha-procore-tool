@@ -1,3 +1,4 @@
+// app/api/procore/documents/aha-fill/route.js
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { readSessionValue, getSessionCookieName } from "../../../../../lib/session";
@@ -25,23 +26,34 @@ async function fetchPdfBytes({ origin, companyId, projectId, fileId, cookieHeade
   return new Uint8Array(await res.arrayBuffer());
 }
 
-function asString(v) {
-  if (v == null) return "";
-  if (Array.isArray(v)) return v.filter(Boolean).join("\n");
-  return String(v);
+function cleanOneLine(s) {
+  return String(s || "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function clampText(s, maxChars) {
-  const t = asString(s);
-  if (!maxChars || t.length <= maxChars) return t;
-  return t.slice(0, maxChars - 1) + "…";
+function clampOneLine(s, max) {
+  const t = cleanOneLine(s);
+  if (!max || max <= 0) return t;
+  return t.length > max ? t.slice(0, max - 1).trimEnd() + "…" : t;
 }
 
-/**
- * Safe field set that also forces appearance for problematic fields.
- * - Forces font size when requested (prevents giant text rendering)
- * - Enables multiline when requested (Notes)
- */
+function cleanMulti(s) {
+  return String(s || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function clampMulti(s, maxChars) {
+  const t = cleanMulti(s);
+  if (!maxChars || maxChars <= 0) return t;
+  return t.length > maxChars ? t.slice(0, maxChars - 1).trimEnd() + "…" : t;
+}
+
 function safeSetText(form, name, value, opts = {}) {
   try {
     const field = form.getTextField(name);
@@ -58,7 +70,7 @@ function safeSetText(form, name, value, opts = {}) {
       } catch {}
     }
 
-    field.setText(asString(value));
+    field.setText(String(value ?? ""));
   } catch {}
 }
 
@@ -95,25 +107,25 @@ export async function POST(req) {
     const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
     const form = pdfDoc.getForm();
 
-    // Force consistent appearance across viewers (prevents huge/odd rendering)
+    // Force consistent appearances (prevents giant text in some viewers)
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     try {
       form.updateFieldAppearances(font);
     } catch {}
 
-    // ===== HEADER =====
-    safeSetText(form, "ActivityWork Task", aha.header?.activityWorkTask, { fontSize: 10 });
-    safeSetText(form, "Project Location", aha.header?.projectLocation, { fontSize: 10 });
-    safeSetText(form, "Contractor", aha.header?.contractor, { fontSize: 10 });
-    safeSetText(form, "Date Prepared", aha.header?.datePrepared, { fontSize: 10 });
-    safeSetText(form, "Prepared by NameTitle", aha.header?.preparedByNameTitle, { fontSize: 10 });
-    safeSetText(form, "Reviewed by NameTitle", aha.header?.reviewedByNameTitle, { fontSize: 10 });
+    // ===== HEADER (tight single-line boxes) =====
+    safeSetText(form, "ActivityWork Task", clampOneLine(aha.header?.activityWorkTask, 60), { fontSize: 10 });
+    safeSetText(form, "Project Location", clampOneLine(aha.header?.projectLocation, 40), { fontSize: 10 });
+    safeSetText(form, "Contractor", clampOneLine(aha.header?.contractor, 28), { fontSize: 10 });
+    safeSetText(form, "Date Prepared", clampOneLine(aha.header?.datePrepared, 12), { fontSize: 10 });
+    safeSetText(form, "Prepared by NameTitle", clampOneLine(aha.header?.preparedByNameTitle, 38), { fontSize: 10 });
+    safeSetText(form, "Reviewed by NameTitle", clampOneLine(aha.header?.reviewedByNameTitle, 38), { fontSize: 10 });
 
-    // Notes is the problem child: multiline + smaller font + cap length
+    // Notes is multiline; keep it sane and small font
     safeSetText(
       form,
       "Notes Field Notes Review Comments",
-      clampText(aha.header?.notes, 650),
+      clampMulti(aha.header?.notes, 240),
       { multiline: true, fontSize: 9 }
     );
 
@@ -123,10 +135,10 @@ export async function POST(req) {
       const row = rows[i] || {};
       const index = i + 1;
 
-      safeSetText(form, `Job StepsRow${index}`, row.step, { fontSize: 9 });
-      safeSetText(form, `HazardsRow${index}`, row.hazards, { fontSize: 9 });
-      safeSetText(form, `ControlsRow${index}`, row.controls, { fontSize: 9 });
-      safeSetText(form, `RACRow${index}`, row.rac, { fontSize: 9 });
+      safeSetText(form, `Job StepsRow${index}`, clampOneLine(row.step, 55), { fontSize: 9 });
+      safeSetText(form, `HazardsRow${index}`, clampOneLine(row.hazards, 55), { fontSize: 9 });
+      safeSetText(form, `ControlsRow${index}`, clampOneLine(row.controls, 85), { fontSize: 9 });
+      safeSetText(form, `RACRow${index}`, clampOneLine(row.rac, 2), { fontSize: 9 });
     }
 
     // ===== EQUIPMENT / TRAINING / INSPECTION =====
@@ -136,19 +148,17 @@ export async function POST(req) {
 
     for (let i = 0; i < 5; i++) {
       const index = i + 1;
-      safeSetText(form, `Equipment to be UsedRow${index}`, equipment[i], { fontSize: 9 });
-      safeSetText(form, `TrainingRow${index}`, training[i], { fontSize: 9 });
-      safeSetText(form, `Inspection RequirementsRow${index}`, inspection[i], { fontSize: 9 });
+      safeSetText(form, `Equipment to be UsedRow${index}`, clampOneLine(equipment[i], 40), { fontSize: 9 });
+      safeSetText(form, `TrainingRow${index}`, clampOneLine(training[i], 40), { fontSize: 9 });
+      safeSetText(form, `Inspection RequirementsRow${index}`, clampOneLine(inspection[i], 40), { fontSize: 9 });
     }
 
-    // Re-apply appearances after setting text (important for consistent rendering)
+    // Re-apply appearances after setting values
     try {
       form.updateFieldAppearances(font);
     } catch {}
 
-    // Flatten so fields become permanent text
     form.flatten();
-
     const filledBytes = await pdfDoc.save();
 
     return new NextResponse(filledBytes, {
