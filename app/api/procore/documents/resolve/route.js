@@ -129,16 +129,51 @@ async function getProjectRootFolderId({ companyId, userId, projectId }) {
 }
 
 async function listChildFolders({ companyId, userId, projectId, parentId }) {
-  const url =
-    `/rest/v1.0/folders?project_id=${encodeURIComponent(String(projectId))}` +
-    `&parent_id=${encodeURIComponent(String(parentId))}`;
+  const pid = encodeURIComponent(String(projectId));
+  const par = String(parentId);
 
-  const data = await procoreGet({ companyId, userId, url, stage: "list_folders" });
+  // 1) Try the "list by parent_id" endpoint first
+  const listUrl = `/rest/v1.0/folders?project_id=${pid}&parent_id=${encodeURIComponent(par)}`;
+  const listData = await procoreGet({ companyId, userId, url: listUrl, stage: "list_folders" });
 
-  const rows = normalizeFolderRows(data);
-  return rows
-    .filter((x) => x && typeof x === "object")
-    .map((x) => ({ id: x.id, name: String(x.name || "") }));
+  // Helper to turn folder objects into {id,name}
+  const toRows = (arr) =>
+    (Array.isArray(arr) ? arr : [])
+      .filter((x) => x && typeof x === "object")
+      .map((x) => ({ id: x.id, name: String(x.name || "") }));
+
+  // Normalize common shapes
+  const normalized = normalizeFolderRows(listData);
+
+  // If Procore returns a single folder object with folders[], use it
+  // BUT ONLY if it's actually the folder we asked for.
+  if (listData && typeof listData === "object" && !Array.isArray(listData)) {
+    const returnedId = listData.id != null ? String(listData.id) : null;
+
+    // If we got the parent folder back, children are in listData.folders
+    if (returnedId === par && Array.isArray(listData.folders)) {
+      return toRows(listData.folders);
+    }
+
+    // If we got some other folder (often project root), ignore it and fall back
+    // (this is the bug you’re hitting)
+  }
+
+  // If the list endpoint returned a normal array of children, use it
+  if (Array.isArray(normalized) && normalized.length > 0) {
+    return toRows(normalized);
+  }
+
+  // 2) Fallback: "show folder" endpoint (more reliable for this tenant)
+  const showUrl = `/rest/v1.0/folders/${encodeURIComponent(par)}?project_id=${pid}`;
+  const folderObj = await procoreGet({ companyId, userId, url: showUrl, stage: "show_folder" });
+
+  if (folderObj && typeof folderObj === "object" && Array.isArray(folderObj.folders)) {
+    return toRows(folderObj.folders);
+  }
+
+  // Last resort: nothing visible
+  return [];
 }
 
 function findFolderByName(children, targetName) {
