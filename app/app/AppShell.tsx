@@ -382,11 +382,17 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
 
       <div style={{ padding: 14, border: "1px solid #e5e5e5", borderRadius: 10 }}>
         <h3 style={{ marginTop: 0 }}>Describe the activity</h3>
+        {!projectId ? (
+      <p style={{ color: "crimson", marginTop: 8 }}>
+        This embedded app must be opened inside a Procore Project.
+      </p>
+    ) : null}
         <p style={{ marginTop: 6, color: "#444" }}>
           Type one sentence. We’ll generate a structured AHA and (next) fill & upload the PDF.
         </p>
 
         <textarea
+          disabled={!companyId || !projectId}
           value={sentence}
           onChange={(e) => setSentence(e.target.value)}
           placeholder='Example: "Install 24x24 fire damper in corridor wall at Level 2 using Hilti anchors and seal with fire caulk."'
