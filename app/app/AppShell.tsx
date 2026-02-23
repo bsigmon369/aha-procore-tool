@@ -38,6 +38,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  const [isCompleting, setIsCompleting] = useState(false);
 
   const oauthInFlightRef = useRef(false);
 
@@ -228,7 +229,90 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
       setIsGenerating(false);
     }
   };
+  // --- AHA complete: resolve → list template folder → pick template pdf → fill+upload ---
+  const completeAha = async () => {
+    if (!companyId || !projectId) {
+      setError("Missing company_id or project_id in embedded context.");
+      return;
+    }
+    if (!ahaJson) {
+      setError("Generate an AHA first.");
+      return;
+    }
 
+    setError(null);
+    setIsCompleting(true);
+
+    try {
+      // 1) resolve folders (Template + Completed)
+      const rr = await fetch("/api/procore/documents/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ company_id: companyId, project_id: projectId }),
+      });
+      const rj = await rr.json().catch(() => null);
+      if (!rr.ok || !rj?.ok || !rj?.templateFolder?.id) {
+        throw new Error(rj?.error || `Resolve failed (${rr.status})`);
+      }
+
+      const templateFolderId = String(rj.templateFolder.id);
+
+      // 2) list template folder contents
+      const lr = await fetch(
+        `/api/procore/documents/list?company_id=${encodeURIComponent(
+          companyId
+        )}&project_id=${encodeURIComponent(projectId)}&folder_id=${encodeURIComponent(templateFolderId)}`,
+        { cache: "no-store" }
+      );
+      const lj = await lr.json().catch(() => null);
+      if (!lr.ok || !lj?.ok || !Array.isArray(lj?.items)) {
+        throw new Error(lj?.error || `List failed (${lr.status})`);
+      }
+
+      // 3) choose the PDF template file in "01 AHA Template"
+      const files = lj.items.filter((x: any) => !x?.isFolder && typeof x?.name === "string");
+      const pdfs = files.filter((x: any) => x.name.toLowerCase().endsWith(".pdf"));
+
+      const preferred =
+        pdfs.find((x: any) => x.name.toLowerCase().includes("template")) ||
+        pdfs.find((x: any) => x.name.toLowerCase().includes("aha")) ||
+        pdfs[0];
+
+      if (!preferred?.id) {
+        throw new Error("No PDF template found in: 01 AHA Template");
+      }
+
+      const templateFileId = String(preferred.id);
+
+      // 4) fill + upload into "02 Completed AHA's"
+      const cr = await fetch("/api/procore/documents/aha-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          company_id: companyId,
+          project_id: projectId,
+          template_file_id: templateFileId,
+          aha: ahaJson,
+          // completed_folder_id optional; route resolves if omitted
+        }),
+      });
+
+      const cj = await cr.json().catch(() => null);
+      if (!cr.ok || !cj?.ok) {
+        throw new Error(cj?.error || `Complete failed (${cr.status})`);
+      }
+
+      // optional: surface success somewhere
+      // setError(null);
+      // alert(`Uploaded: ${cj.filename}`);
+    } catch (e: any) {
+      setError(e?.message || "Complete failed");
+    } finally {
+      setIsCompleting(false);
+    }
+  };
   // --- UI ---
   if (boot.status === "loading") {
     return <div style={{ padding: 40 }}>Loading AHA Builder…</div>;
@@ -331,7 +415,21 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
           >
             {isGenerating ? "Generating…" : "Generate AHA"}
           </button>
-
+          <button
+            disabled={isCompleting || !ahaJson}
+            onClick={completeAha}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 8,
+              border: "1px solid #111",
+              background: isCompleting ? "#f5f5f5" : "#fff",
+              color: "#111",
+              cursor: isCompleting || !ahaJson ? "not-allowed" : "pointer",
+            }}
+            >
+            {isCompleting ? "Uploading…" : "Fill & Upload PDF"}
+          </button>
+          
           <button
             onClick={() => {
               setSentence("");
