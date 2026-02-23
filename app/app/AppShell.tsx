@@ -221,7 +221,7 @@ export default function AppShell({ mode, context }: { mode: Mode; context: Conte
         throw new Error(json?.error || `Generate failed (${res.status})`);
       }
 
-      setAhaJson(json);
+      setAhaJson(json?.aha ?? null);
     } catch (e: any) {
       setError(e?.message || "Generate failed");
     } finally {
