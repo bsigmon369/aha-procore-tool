@@ -303,14 +303,29 @@ export async function POST(req) {
     const finalName = nextVersionedName(baseName, existingNames);
 
     // --- upload + move into Procore ---
-    const uploadRes = await procoreDirectUploadToFolder({
-      companyId: company_id,
-      userId: session.userId,
-      projectId: project_id,
-      folderId: completedFolderId,
-      filename: finalName,
-      bytes: new Uint8Array(filledBytes),
-    });
+    let uploadRes;
+    try {
+      uploadRes = await procoreDirectUploadToFolder({
+        companyId: company_id,
+        userId: session.userId,
+        projectId: project_id,
+        folderId: completedFolderId,
+        filename: finalName,
+        bytes: new Uint8Array(filledBytes),
+      });
+    } catch (e) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Procore error during upload/create-file",
+          stage: "upload_or_create_file",
+          message: e?.message || String(e),
+          completedFolderId,
+          filename: finalName,
+        },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
       ok: true,
