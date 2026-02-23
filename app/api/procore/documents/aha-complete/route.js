@@ -90,16 +90,22 @@ async function listFolderFiles({ companyId, userId, projectId, folderId }) {
   }));
 }
 
+/**
+ * STEP A: Create upload instructions + upload bytes to storage
+ * STEP B: Create a Project File to "move" the uploaded binary into Documents tool
+ *
+ * This "create file" step is REQUIRED for the file to appear in Documents.
+ */
 async function procoreDirectUploadToFolder({ companyId, userId, projectId, folderId, filename, bytes }) {
-  // 1) create upload instructions
+  // A) create upload instructions (NO parent_id here)
   const create = await procoreFetchSafe(
     `/rest/v1.0/projects/${encodeURIComponent(projectId)}/uploads`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Procore-Company-Id": String(companyId) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         response_filename: filename,
-        parent_id: folderId,
+        response_content_type: "application/pdf",
       }),
     },
     companyId,
@@ -111,11 +117,13 @@ async function procoreDirectUploadToFolder({ companyId, userId, projectId, folde
   }
 
   const upload = create.data;
-  if (!upload?.url || !upload?.fields) {
-    throw new Error(`Upload instructions missing url/fields: ${JSON.stringify(upload)}`);
+  const uploadUuid = upload?.uuid || upload?.id || null;
+
+  if (!uploadUuid || !upload?.url || !upload?.fields) {
+    throw new Error(`Upload instructions missing uuid/url/fields: ${JSON.stringify(upload)}`);
   }
 
-  // 2) multipart POST to storage
+  // B) POST multipart form-data to storage (S3)
   const form = new FormData();
   for (const [k, v] of Object.entries(upload.fields)) {
     form.append(k, String(v));
@@ -128,8 +136,32 @@ async function procoreDirectUploadToFolder({ companyId, userId, projectId, folde
     throw new Error(`Storage upload failed: ${storage.status} ${text.slice(0, 500)}`);
   }
 
-  // Some Procore flows require finalization; we’ll add it only if needed later.
-  return { uploadUuid: upload.uuid || upload.id || null };
+  // C) Create Project File (associate upload UUID into Documents folder)
+  // Procore endpoint is POST /rest/v1.0/files with project_id param and multipart form-data:
+  // file[parent_id], file[name], file[upload_uuid]
+  const createFileForm = new FormData();
+  createFileForm.append("file[parent_id]", String(folderId));
+  createFileForm.append("file[name]", String(filename));
+  createFileForm.append("file[upload_uuid]", String(uploadUuid));
+
+  const createFile = await procoreFetchSafe(
+    `/rest/v1.0/files?project_id=${encodeURIComponent(projectId)}`,
+    {
+      method: "POST",
+      body: createFileForm,
+      // DO NOT set Content-Type; fetch will set multipart boundary
+    },
+    companyId,
+    userId
+  );
+
+  if (!createFile.ok) {
+    throw new Error(`Create file failed: ${createFile.status} ${JSON.stringify(createFile.data)}`);
+  }
+
+  const fileId = createFile.data?.id ?? createFile.data?.file?.id ?? null;
+
+  return { uploadUuid, fileId };
 }
 
 // pdf-lib fill: copy of your existing safe setters (kept minimal)
@@ -213,7 +245,7 @@ export async function POST(req) {
       form.updateFieldAppearances(font);
     } catch {}
 
-    // Header (keep aligned to your existing aha-fill mapping)
+    // Header
     safeSetText(form, "ActivityWork Task", clampOneLine(aha?.header?.activityWorkTask, 60), { fontSize: 10 });
     safeSetText(form, "Project Location", clampOneLine(aha?.header?.projectLocation, 40), { fontSize: 10 });
     safeSetText(form, "Contractor", clampOneLine(aha?.header?.contractor, 28), { fontSize: 10 });
@@ -259,7 +291,6 @@ export async function POST(req) {
     // --- safe naming + versioning ---
     const date = cleanOneLine(aha?.header?.datePrepared) || new Date().toISOString().slice(0, 10);
     const activity = slugifyFilenamePart(aha?.header?.activityWorkTask || "aha");
-
     const baseName = filename ? String(filename) : `AHA-${date}-${activity || "activity"}.pdf`;
 
     const existing = await listFolderFiles({
@@ -271,7 +302,7 @@ export async function POST(req) {
     const existingNames = new Set(existing.map((x) => x.name));
     const finalName = nextVersionedName(baseName, existingNames);
 
-    // --- upload ---
+    // --- upload + move into Procore ---
     const uploadRes = await procoreDirectUploadToFolder({
       companyId: company_id,
       userId: session.userId,
@@ -285,7 +316,7 @@ export async function POST(req) {
       ok: true,
       completedFolderId,
       filename: finalName,
-      upload: uploadRes,
+      upload: uploadRes, // includes uploadUuid + fileId
     });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
