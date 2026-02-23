@@ -63,26 +63,87 @@ async function fetchProject({ companyId, userId, projectId }) {
   return last;
 }
 
-async function listChildFolders({ companyId, userId, projectId, parentId }) {
-  const url =
-    `/rest/v1.0/folders?project_id=${encodeURIComponent(String(projectId))}` +
-    `&parent_id=${encodeURIComponent(String(parentId))}`;
-
-  const r = await procoreFetchSafe(url, { method: "GET" }, companyId, userId);
-
-  if (!r.ok) {
-    throw Object.assign(new Error("List folders failed"), {
-      stage: "list_folders",
-      status: r.status,
-      url: r.url,
-      data: r.data,
-    });
-  }
-
-  const rows = Array.isArray(r.data) ? r.data : Array.isArray(r.data?.data) ? r.data.data : [];
+function normalizeFolderRows(data) {
+  const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
   return rows
     .filter((x) => x && typeof x === "object")
     .map((x) => ({ id: x.id, name: String(x.name || "") }));
+}
+
+/**
+ * Root listing is tenant-dependent:
+ * - some require omitting parent_id
+ * - some accept parent_id=ROOT
+ * - some use parent_id=0
+ */
+async function listChildFolders({ companyId, userId, projectId, parentId }) {
+  const base = `/rest/v1.0/folders?project_id=${encodeURIComponent(String(projectId))}`;
+
+  const candidates =
+    String(parentId) === "ROOT"
+      ? [
+          { stage: "list_folders_root_no_parent", url: base },
+          { stage: "list_folders_root_ROOT", url: `${base}&parent_id=${encodeURIComponent("ROOT")}` },
+          { stage: "list_folders_root_0", url: `${base}&parent_id=${encodeURIComponent("0")}` },
+        ]
+      : [
+          {
+            stage: "list_folders",
+            url: `${base}&parent_id=${encodeURIComponent(String(parentId))}`,
+          },
+        ];
+
+  let lastResp = null;
+
+  for (const c of candidates) {
+    const r = await procoreFetchSafe(c.url, { method: "GET" }, companyId, userId);
+    lastResp = { ...r, stage: c.stage };
+
+    if (!r.ok) {
+      // If it's the root attempts, keep trying; if non-root, fail immediately.
+      if (String(parentId) !== "ROOT") {
+        throw Object.assign(new Error("List folders failed"), {
+          stage: c.stage,
+          status: r.status,
+          url: r.url,
+          data: r.data,
+        });
+      }
+      continue;
+    }
+
+    const items = normalizeFolderRows(r.data);
+
+    // If root attempt returns non-empty, take it immediately
+    if (String(parentId) === "ROOT") {
+      if (items.length > 0) return items;
+      // empty root result: try next candidate
+      continue;
+    }
+
+    return items;
+  }
+
+  // If we got here on ROOT, all root attempts either failed or were empty.
+  // Return empty (so resolver can throw a clear "Folder not found" and include found: [])
+  // BUT include a better debug log in Vercel.
+  if (String(parentId) === "ROOT") {
+    console.log("[resolve] ROOT list empty or failed", {
+      projectId: String(projectId),
+      lastStatus: lastResp?.status,
+      lastUrl: lastResp?.url,
+      lastData: lastResp?.data,
+    });
+    return [];
+  }
+
+  // Non-root should never reach here
+  throw Object.assign(new Error("List folders failed"), {
+    stage: "list_folders",
+    status: lastResp?.status || 500,
+    url: lastResp?.url || null,
+    data: lastResp?.data || null,
+  });
 }
 
 function findFolderByName(children, targetName) {
@@ -148,7 +209,7 @@ export async function POST(req) {
       });
     }
 
-    // Keep this to validate auth/session is still good (but do NOT rely on project payload for docs root)
+    // keep for auth sanity; do not rely on payload for docs root
     const projResp = await fetchProject({ companyId, userId: session.userId, projectId });
 
     if (!projResp?.ok) {
@@ -161,10 +222,9 @@ export async function POST(req) {
       });
     }
 
-    // Procore Documents root is virtual. Use ROOT for consistent folder walking.
     const docsRootId = "ROOT";
 
-    // TEMP DEBUG (safe): helps confirm the project has expected top-level structure
+    // TEMP DEBUG: verify we can see folders at root
     const top = await listChildFolders({
       companyId,
       userId: session.userId,
