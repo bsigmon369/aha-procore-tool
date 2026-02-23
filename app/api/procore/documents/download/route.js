@@ -56,6 +56,9 @@ export async function GET(req) {
       file?.downloadUrl ||
       file?.file_versions?.[0]?.download_url ||
       file?.file_versions?.[0]?.downloadUrl ||
+      file?.file_versions?.[0]?.url ||
+      file?.file_versions?.[0]?.prostore_file?.url ||
+      file?.file_versions?.[0]?.prostore_file?.download_url ||
       null;
 
     if (!downloadUrl) {
