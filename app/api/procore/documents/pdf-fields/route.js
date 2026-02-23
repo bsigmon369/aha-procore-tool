@@ -5,7 +5,6 @@ import { readSessionValue, getSessionCookieName } from "../../../../../lib/sessi
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// We will reuse your existing download route to fetch the PDF bytes server-side.
 async function fetchPdfBytes({ origin, companyId, projectId, fileId, cookieHeader }) {
   const url = new URL("/api/procore/documents/download", origin);
   url.searchParams.set("company_id", String(companyId));
@@ -14,10 +13,7 @@ async function fetchPdfBytes({ origin, companyId, projectId, fileId, cookieHeade
 
   const res = await fetch(url.toString(), {
     method: "GET",
-    headers: {
-      // forward cookies so download route can authenticate
-      Cookie: cookieHeader || "",
-    },
+    headers: { Cookie: cookieHeader || "" },
     cache: "no-store",
   });
 
@@ -45,7 +41,6 @@ export async function GET(req) {
       );
     }
 
-    // Ensure session exists (same pattern as your other routes)
     const raw = cookies().get(getSessionCookieName())?.value;
     const session = readSessionValue(raw);
     if (!session?.companyId || !session?.userId) {
@@ -55,36 +50,21 @@ export async function GET(req) {
       return NextResponse.json({ ok: false, error: "Session/company mismatch" }, { status: 401 });
     }
 
-    // Lazy import to avoid bundling surprises
-    const { PDFDocument } = await import("pdf-lib");
-
-    // forward all cookies from this request to the internal download call
     const cookieHeader = req.headers.get("cookie") || "";
     const pdfBytes = await fetchPdfBytes({ origin, companyId, projectId, fileId, cookieHeader });
 
-    const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-
-    const form = pdfDoc.getForm();
-    const fields = form.getFields();
-
-    const out = fields.map((f) => {
-      const type = f.constructor?.name || "UnknownField";
-      let name = "";
-      try {
-        name = f.getName();
-      } catch {
-        name = "";
-      }
-      return { name, type };
-    });
-
-    const pageCount = pdfDoc.getPageCount();
+    // Cheap “is there a form?” detection
+    // Search for common tokens:
+    const sample = Buffer.from(pdfBytes.slice(0, Math.min(pdfBytes.length, 2_000_000))).toString("latin1");
+    const hasAcroForm = sample.includes("/AcroForm");
+    const hasXfa = sample.includes("/XFA");
 
     return NextResponse.json({
       ok: true,
-      pageCount,
-      fieldCount: out.length,
-      fields: out,
+      bytes: pdfBytes.length,
+      hasAcroForm,
+      hasXfa,
+      note: "If hasAcroForm/hasXfa is false, we must do coordinate overlay filling.",
     });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err?.message || "Unknown error" }, { status: 500 });
