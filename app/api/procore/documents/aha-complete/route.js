@@ -49,7 +49,7 @@ async function procoreGet({ companyId, userId, url }) {
   return r.data;
 }
 
-// --- resolve helpers (same behavior as resolve route) ---
+// --- resolve helpers ---
 async function getProjectRootFolderId({ companyId, userId, projectId }) {
   const pid = encodeURIComponent(String(projectId));
   const rootObj = await procoreGet({
@@ -84,30 +84,26 @@ async function listChildFolders({ companyId, userId, projectId, parentId }) {
     .map((x) => ({ id: x.id, name: String(x.name || "") }));
 }
 
-// ✅ Alias-aware folder matching (fixes “Preparation” vs “Preperation”)
+// Alias-aware folder matching (fixes “Preparation” vs “Preperation”)
 function findFolderByName(children, targetName) {
   const t = String(targetName || "").trim();
   if (!t) return null;
 
   const aliases = {
-    "00 Preparation": ["00 Preperation"], // observed typo in your projects
+    "00 Preparation": ["00 Preperation"],
   };
 
   const candidates = [t, ...(aliases[t] || [])];
 
-  // exact match pass
   for (const c of candidates) {
     const exact = children.find((x) => String(x.name || "").trim() === c);
     if (exact) return exact;
   }
-
-  // case-insensitive pass
   for (const c of candidates) {
     const cl = c.toLowerCase();
     const hit = children.find((x) => String(x.name || "").trim().toLowerCase() === cl);
     if (hit) return hit;
   }
-
   return null;
 }
 
@@ -147,7 +143,7 @@ function cleanMulti(s) {
 function clampOneLine(s, max) {
   const t = cleanOneLine(s);
   if (!max || max <= 0) return t;
-  return t.length > max ? t.slice(0, max - 1).trimEnd() + "…" : t;
+  return t.length > max ? t.slice(0, max).trimEnd() : t;
 }
 
 function safeSetText(form, name, value, opts = {}) {
@@ -178,7 +174,7 @@ function normalizeName(s) {
     .trim();
 }
 
-// ✅ Project Location: Job# + Name, then City/ST
+// Project Location: Job# + Name, then City/ST
 function buildProjectLocationTwoLine(project) {
   const jobNumber = String(project?.project_number || "").trim();
   const name = String(project?.name || "").trim();
@@ -192,7 +188,53 @@ function buildProjectLocationTwoLine(project) {
   return line1 || line2 || "";
 }
 
-// --- Wrapping engine ---
+// Notes cleanup: remove “assumed/assuming/assumption”
+function cleanNotes(text) {
+  return cleanMulti(text)
+    .replace(/\bassumed\b/gi, "")
+    .replace(/\bassuming\b/gi, "")
+    .replace(/\bassumption\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Aggressive compression to fit boxes (no ellipsis ever)
+function compressForBox(text) {
+  let t = cleanMulti(text);
+
+  const replacements = [
+    [/\bplease\b/gi, ""],
+    [/\bensure that\b/gi, "ensure"],
+    [/\bmake sure\b/gi, "ensure"],
+    [/\bin order to\b/gi, "to"],
+    [/\bprior to\b/gi, "before"],
+    [/\bas needed\b/gi, ""],
+    [/\bas appropriate\b/gi, ""],
+    [/\bif applicable\b/gi, ""],
+    [/\bwhen applicable\b/gi, ""],
+    [/\bat all times\b/gi, "always"],
+    [/\butilize\b/gi, "use"],
+    [/\bapproximately\b/gi, "about"],
+    [/\bwith the use of\b/gi, "using"],
+    [/\bfor the purpose of\b/gi, "to"],
+  ];
+  for (const [re, sub] of replacements) t = t.replace(re, sub);
+
+  t = t.replace(/\b(the|a|an)\b/gi, "");
+
+  t = t
+    .replace(/[;:]/g, ",")
+    .replace(/\.\s+/g, "\n")
+    .replace(/\s+,/g, ",")
+    .replace(/,\s*,/g, ",")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  t = t.replace(/ \n /g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return t;
+}
+
+// --- Wrapping engine (NO ellipsis; throw if too long) ---
 function getFirstWidgetRect(textField) {
   try {
     const widgets = textField?.acroField?.getWidgets?.();
@@ -205,12 +247,6 @@ function getFirstWidgetRect(textField) {
 }
 
 function wrapWordsToWidth(font, text, fontSize, maxWidth) {
-  const words = String(text || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .split(/\s+/)
-    .filter(Boolean);
-
   const widthOf = (s) => {
     try {
       return font.widthOfTextAtSize(s, fontSize);
@@ -218,6 +254,12 @@ function wrapWordsToWidth(font, text, fontSize, maxWidth) {
       return s.length * fontSize * 0.5;
     }
   };
+
+  const words = String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split(/\s+/)
+    .filter(Boolean);
 
   const lines = [];
   let line = "";
@@ -251,27 +293,16 @@ function wrapWordsToWidth(font, text, fontSize, maxWidth) {
   return lines;
 }
 
-function ellipsizeToWidth(font, text, fontSize, maxWidth) {
-  const t = String(text || "").trim();
-  const ell = "…";
-
-  const widthOf = (s) => {
-    try {
-      return font.widthOfTextAtSize(s, fontSize);
-    } catch {
-      return s.length * fontSize * 0.5;
-    }
-  };
-
-  if (!t) return "";
-  if (widthOf(t) <= maxWidth) return t;
-
-  let out = t;
-  while (out.length > 0 && widthOf(out + ell) > maxWidth) out = out.slice(0, -1);
-  return (out.trimEnd() || "") + ell;
-}
-
-function safeSetWrappedText({ form, fieldName, value, font, maxFontSize = 9, minFontSize = 8, padding = 2 }) {
+function safeSetWrappedTextNoEllipsis({
+  form,
+  fieldName,
+  value,
+  font,
+  maxFontSize = 9,
+  minFontSize = 8,
+  padding = 2,
+  compress = true,
+}) {
   try {
     const field = form.getTextField(fieldName);
     try {
@@ -280,7 +311,8 @@ function safeSetWrappedText({ form, fieldName, value, font, maxFontSize = 9, min
 
     const rect = getFirstWidgetRect(field);
     if (!rect) {
-      field.setText(cleanMulti(value));
+      const v = compress ? compressForBox(value) : cleanMulti(value);
+      field.setText(v);
       try {
         field.setFontSize(maxFontSize);
       } catch {}
@@ -290,59 +322,41 @@ function safeSetWrappedText({ form, fieldName, value, font, maxFontSize = 9, min
     const maxWidth = Math.max(1, rect.width - padding * 2);
     const maxHeight = Math.max(1, rect.height - padding * 2);
 
-    const raw = cleanMulti(value);
-    const paragraphs = raw ? raw.split(/\n{2,}/) : [""];
+    const candidates = [];
+    candidates.push(cleanMulti(value));
+    if (compress) candidates.push(compressForBox(value));
 
-    for (let size = maxFontSize; size >= minFontSize; size -= 0.5) {
-      const lineHeight = size * 1.15;
-      const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
+    for (const candidateText of candidates) {
+      const raw = cleanMulti(candidateText);
+      const paragraphs = raw ? raw.split(/\n{2,}/) : [""];
 
-      let lines = [];
-      for (let p = 0; p < paragraphs.length; p++) {
-        const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
-        lines.push(...paraLines);
-        if (p < paragraphs.length - 1) lines.push("");
-      }
+      for (let size = maxFontSize; size >= minFontSize; size -= 0.5) {
+        const lineHeight = size * 1.15;
+        const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
 
-      if (lines.length <= maxLines) {
-        try {
-          field.setFontSize(size);
-        } catch {}
-        field.setText(lines.join("\n"));
-        return;
+        let lines = [];
+        for (let p = 0; p < paragraphs.length; p++) {
+          const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
+          lines.push(...paraLines);
+          if (p < paragraphs.length - 1) lines.push("");
+        }
+
+        if (lines.length <= maxLines) {
+          try {
+            field.setFontSize(size);
+          } catch {}
+          field.setText(lines.join("\n"));
+          return;
+        }
       }
     }
 
-    // truncate at min font size
-    const size = minFontSize;
-    const lineHeight = size * 1.15;
-    const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
-
-    let lines = [];
-    for (let p = 0; p < paragraphs.length; p++) {
-      const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
-      lines.push(...paraLines);
-      if (p < paragraphs.length - 1) lines.push("");
-    }
-
-    lines = lines.slice(0, maxLines);
-    lines[maxLines - 1] = ellipsizeToWidth(font, lines[maxLines - 1], size, maxWidth);
-
-    try {
-      field.setFontSize(size);
-    } catch {}
-    field.setText(lines.join("\n"));
-  } catch {}
-}
-
-// --- Notes cleanup: remove “assumed/assuming/assumption” ---
-function cleanNotes(text) {
-  return cleanMulti(text)
-    .replace(/\bassumed\b/gi, "")
-    .replace(/\bassuming\b/gi, "")
-    .replace(/\bassumption\b/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    // Still doesn't fit after compression at min font: throw hard error
+    throw new Error(`Text string too long: ${fieldName}`);
+  } catch (e) {
+    // Do not swallow. Route will return 400 with field name.
+    throw e;
+  }
 }
 
 // --- filename helpers ---
@@ -375,14 +389,12 @@ async function procoreCreateProjectUpload({ companyId, userId, projectId, filena
     throw new Error(`Create Upload failed ${r.status}: ${msg}`);
   }
 
-  return r.data; // may include: { id, uuid, url, fields }
+  return r.data;
 }
 
 async function s3PostUpload({ uploadUrl, fields, fileBytes, filename }) {
   const fd = new FormData();
-  for (const [k, v] of Object.entries(fields || {})) {
-    fd.append(k, String(v));
-  }
+  for (const [k, v] of Object.entries(fields || {})) fd.append(k, String(v));
   fd.append("file", new Blob([fileBytes], { type: "application/pdf" }), filename);
 
   const res = await fetch(uploadUrl, { method: "POST", body: fd });
@@ -409,7 +421,6 @@ async function procoreCreateProjectFile({
     name: String(filename),
   };
 
-  // IMPORTANT: support both upload_id and upload_uuid
   if (uploadId) filePayload.upload_id = uploadId;
   if (uploadUuid) filePayload.upload_uuid = String(uploadUuid);
 
@@ -463,7 +474,6 @@ export async function POST(req) {
       });
     }
 
-    // Resolve completed folder if not provided
     let completedFolderId = completedFolderIdInput ? String(completedFolderIdInput) : null;
 
     if (!completedFolderId) {
@@ -482,7 +492,6 @@ export async function POST(req) {
       });
     }
 
-    // Download template PDF bytes (from Procore file id)
     const cookieHeader = req.headers.get("cookie") || "";
     const pdfBytes = await fetchPdfBytes({
       origin: new URL(req.url).origin,
@@ -501,9 +510,7 @@ export async function POST(req) {
       form.updateFieldAppearances(font);
     } catch {}
 
-    // ===== Apply formatting requirements =====
-
-    // A) Project Location: Job# + Name, then City/ST from Procore project
+    // Project data for location
     let projectLocation = "";
     try {
       const proj = await procoreFetchSafe(
@@ -515,31 +522,27 @@ export async function POST(req) {
       if (proj.ok) projectLocation = buildProjectLocationTwoLine(proj.data);
     } catch {}
 
-    // B) Contractor: constant default
     const contractor = "Sessa Sheet Metal Contractors, Inc.";
-
-    // C) Prepared By: leave as-is
     const preparedBy = String(aha.header?.preparedByNameTitle || "").trim();
-
-    // D) Reviewed By logic
     const preparedNorm = normalizeName(preparedBy);
     const isPatPrepared = preparedNorm === "pat lowrie" || preparedNorm.startsWith("pat lowrie ");
     const reviewedBy = isPatPrepared ? "Bobby Sigmon" : "Pat Lowrie";
 
-    // E) filename: "AHA - Activity - Date.pdf"
+    // Filename: AHA prefix + Activity + Date
     const activity = sanitizeFilePart(aha.header?.activityWorkTask) || "Activity";
     const date = sanitizeFilePart(aha.header?.datePrepared) || new Date().toISOString().slice(0, 10);
     const filename = `AHA - ${activity} - ${date}.pdf`;
 
     safeSetText(form, "ActivityWork Task", clampOneLine(aha.header?.activityWorkTask, 60), { fontSize: 10 });
 
-    safeSetWrappedText({
+    safeSetWrappedTextNoEllipsis({
       form,
       fieldName: "Project Location",
       value: projectLocation || aha.header?.projectLocation || "",
       font,
       maxFontSize: 10,
       minFontSize: 9,
+      compress: true,
     });
 
     safeSetText(form, "Contractor", clampOneLine(contractor, 40), { fontSize: 10 });
@@ -547,31 +550,32 @@ export async function POST(req) {
     safeSetText(form, "Prepared by NameTitle", clampOneLine(preparedBy, 38), { fontSize: 10 });
     safeSetText(form, "Reviewed by NameTitle", clampOneLine(reviewedBy, 38), { fontSize: 10 });
 
-    // Notes: wrap to box + remove “assumed”
+    // Notes: remove "assumed", compress to fit, throw if too long
     const notesClean = cleanNotes(aha.header?.notes || "");
-    safeSetWrappedText({
+    safeSetWrappedTextNoEllipsis({
       form,
       fieldName: "Notes Field Notes Review Comments",
       value: notesClean,
       font,
       maxFontSize: 9,
       minFontSize: 8,
+      compress: true,
     });
 
-    // Job Steps/Hazards/Controls wrap (Rows 1–5)
+    // Job Steps / Hazards / Controls: compress to fit, throw if too long
     const rows = Array.isArray(aha.jobStepRows) ? aha.jobStepRows : [];
     for (let i = 0; i < 5; i++) {
       const row = rows[i] || {};
       const index = i + 1;
 
-      safeSetWrappedText({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 8 });
-      safeSetWrappedText({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 8 });
-      safeSetWrappedText({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 8 });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 8, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 8, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 8, compress: true });
 
       safeSetText(form, `RACRow${index}`, clampOneLine(row.rac, 2), { fontSize: 9 });
     }
 
-    // Equipment / Training / Inspection (keep one-line)
+    // Equipment / Training / Inspection: keep one-line, no ellipsis
     const equipment = Array.isArray(aha.resources?.equipmentToBeUsed) ? aha.resources.equipmentToBeUsed : [];
     const training = Array.isArray(aha.resources?.training) ? aha.resources.training : [];
     const inspection = Array.isArray(aha.resources?.inspectionRequirements) ? aha.resources.inspectionRequirements : [];
@@ -590,7 +594,6 @@ export async function POST(req) {
     form.flatten();
     const filledBytes = await pdfDoc.save();
 
-    // Upload steps
     const upload = await procoreCreateProjectUpload({
       companyId: String(companyId),
       userId: String(session.userId),
@@ -623,6 +626,14 @@ export async function POST(req) {
       file: createdFile,
     });
   } catch (err) {
-    return jsonError(500, err?.message || "Unknown error");
+    const msg = err?.message || "Unknown error";
+
+    if (msg.startsWith("Text string too long:")) {
+      return jsonError(400, "Text string too long", {
+        field: msg.replace("Text string too long:", "").trim(),
+      });
+    }
+
+    return jsonError(500, msg);
   }
 }
