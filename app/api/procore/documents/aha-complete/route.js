@@ -198,7 +198,7 @@ function cleanNotes(text) {
     .trim();
 }
 
-// Aggressive compression to fit boxes (no ellipsis ever)
+// Compression to fit boxes (NO newlines added)
 function compressForBox(text) {
   let t = cleanMulti(text);
 
@@ -217,20 +217,22 @@ function compressForBox(text) {
     [/\bapproximately\b/gi, "about"],
     [/\bwith the use of\b/gi, "using"],
     [/\bfor the purpose of\b/gi, "to"],
+    [/\bshall\b/gi, "must"],
   ];
   for (const [re, sub] of replacements) t = t.replace(re, sub);
 
+  // Remove article clutter
   t = t.replace(/\b(the|a|an)\b/gi, "");
 
+  // Keep on one “paragraph” (no manual newlines)
   t = t
     .replace(/[;:]/g, ",")
-    .replace(/\.\s+/g, "\n")
+    .replace(/\.\s+/g, "; ")
     .replace(/\s+,/g, ",")
     .replace(/,\s*,/g, ",")
     .replace(/\s+/g, " ")
     .trim();
 
-  t = t.replace(/ \n /g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   return t;
 }
 
@@ -273,6 +275,7 @@ function wrapWordsToWidth(font, text, fontSize, maxWidth) {
 
     if (line) lines.push(line);
 
+    // hard-break a single long word
     if (widthOf(w) > maxWidth) {
       let chunk = "";
       for (const ch of w) {
@@ -299,64 +302,62 @@ function safeSetWrappedTextNoEllipsis({
   value,
   font,
   maxFontSize = 9,
-  minFontSize = 8,
-  padding = 2,
+  minFontSize = 6.5, // allow smaller font to reduce “too long” false positives
+  padding = 0.75,
+  lineHeightMult = 1.02,
   compress = true,
 }) {
+  const field = form.getTextField(fieldName);
   try {
-    const field = form.getTextField(fieldName);
+    field.enableMultiline();
+  } catch {}
+
+  const rect = getFirstWidgetRect(field);
+  const candidates = [];
+
+  const base = cleanMulti(value);
+  candidates.push(base);
+  if (compress) candidates.push(compressForBox(base));
+
+  // If cannot measure, write compressed and do not error
+  if (!rect) {
+    const v = candidates[candidates.length - 1] || "";
     try {
-      field.enableMultiline();
+      field.setFontSize(maxFontSize);
     } catch {}
+    field.setText(v);
+    return;
+  }
 
-    const rect = getFirstWidgetRect(field);
-    if (!rect) {
-      const v = compress ? compressForBox(value) : cleanMulti(value);
-      field.setText(v);
-      try {
-        field.setFontSize(maxFontSize);
-      } catch {}
-      return;
-    }
+  const maxWidth = Math.max(1, rect.width - padding * 2);
+  const maxHeight = Math.max(1, rect.height - padding * 2);
 
-    const maxWidth = Math.max(1, rect.width - padding * 2);
-    const maxHeight = Math.max(1, rect.height - padding * 2);
+  for (const candidateText of candidates) {
+    // Normalize any incoming newlines to spaces (prevents maxLines blowup)
+    const normalized = String(candidateText || "").replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+    const paragraphs = [normalized];
 
-    const candidates = [];
-    candidates.push(cleanMulti(value));
-    if (compress) candidates.push(compressForBox(value));
+    for (let size = maxFontSize; size >= minFontSize; size -= 0.5) {
+      const lineHeight = size * lineHeightMult;
+      const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
 
-    for (const candidateText of candidates) {
-      const raw = cleanMulti(candidateText);
-      const paragraphs = raw ? raw.split(/\n{2,}/) : [""];
+      let lines = [];
+      for (let p = 0; p < paragraphs.length; p++) {
+        const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
+        lines.push(...paraLines);
+      }
 
-      for (let size = maxFontSize; size >= minFontSize; size -= 0.5) {
-        const lineHeight = size * 1.15;
-        const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
-
-        let lines = [];
-        for (let p = 0; p < paragraphs.length; p++) {
-          const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
-          lines.push(...paraLines);
-          if (p < paragraphs.length - 1) lines.push("");
-        }
-
-        if (lines.length <= maxLines) {
-          try {
-            field.setFontSize(size);
-          } catch {}
-          field.setText(lines.join("\n"));
-          return;
-        }
+      if (lines.length <= maxLines) {
+        try {
+          field.setFontSize(size);
+        } catch {}
+        field.setText(lines.join("\n"));
+        return;
       }
     }
-
-    // Still doesn't fit after compression at min font: throw hard error
-    throw new Error(`Text string too long: ${fieldName}`);
-  } catch (e) {
-    // Do not swallow. Route will return 400 with field name.
-    throw e;
   }
+
+  throw new Error(`Text string too long: ${fieldName}`);
 }
 
 // --- filename helpers ---
@@ -541,7 +542,7 @@ export async function POST(req) {
       value: projectLocation || aha.header?.projectLocation || "",
       font,
       maxFontSize: 10,
-      minFontSize: 9,
+      minFontSize: 8,
       compress: true,
     });
 
@@ -558,7 +559,7 @@ export async function POST(req) {
       value: notesClean,
       font,
       maxFontSize: 9,
-      minFontSize: 8,
+      minFontSize: 6.5,
       compress: true,
     });
 
@@ -568,9 +569,9 @@ export async function POST(req) {
       const row = rows[i] || {};
       const index = i + 1;
 
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 8, compress: true });
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 8, compress: true });
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 8, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 6.5, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 6.5, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 6.5, compress: true });
 
       safeSetText(form, `RACRow${index}`, clampOneLine(row.rac, 2), { fontSize: 9 });
     }
