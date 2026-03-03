@@ -84,12 +84,31 @@ async function listChildFolders({ companyId, userId, projectId, parentId }) {
     .map((x) => ({ id: x.id, name: String(x.name || "") }));
 }
 
+// ✅ Alias-aware folder matching (fixes “Preparation” vs “Preperation”)
 function findFolderByName(children, targetName) {
   const t = String(targetName || "").trim();
-  const exact = children.find((c) => String(c.name || "").trim() === t);
-  if (exact) return exact;
-  const tl = t.toLowerCase();
-  return children.find((c) => String(c.name || "").trim().toLowerCase() === tl) || null;
+  if (!t) return null;
+
+  const aliases = {
+    "00 Preparation": ["00 Preperation"], // observed typo in your projects
+  };
+
+  const candidates = [t, ...(aliases[t] || [])];
+
+  // exact match pass
+  for (const c of candidates) {
+    const exact = children.find((x) => String(x.name || "").trim() === c);
+    if (exact) return exact;
+  }
+
+  // case-insensitive pass
+  for (const c of candidates) {
+    const cl = c.toLowerCase();
+    const hit = children.find((x) => String(x.name || "").trim().toLowerCase() === cl);
+    if (hit) return hit;
+  }
+
+  return null;
 }
 
 async function resolvePath({ companyId, userId, projectId, startParentId, pathSegments }) {
@@ -108,7 +127,7 @@ async function resolvePath({ companyId, userId, projectId, startParentId, pathSe
   return parentId;
 }
 
-// --- PDF text helpers (same style as aha-fill) ---
+// --- PDF text helpers ---
 function cleanOneLine(s) {
   return String(s || "")
     .replace(/[\r\n]+/g, " ")
@@ -129,12 +148,6 @@ function clampOneLine(s, max) {
   const t = cleanOneLine(s);
   if (!max || max <= 0) return t;
   return t.length > max ? t.slice(0, max - 1).trimEnd() + "…" : t;
-}
-
-function clampMulti(s, maxChars) {
-  const t = cleanMulti(s);
-  if (!maxChars || maxChars <= 0) return t;
-  return t.length > maxChars ? t.slice(0, maxChars - 1).trimEnd() + "…" : t;
 }
 
 function safeSetText(form, name, value, opts = {}) {
@@ -165,16 +178,21 @@ function normalizeName(s) {
     .trim();
 }
 
+// ✅ Project Location: Job# + Name, then City/ST
 function buildProjectLocationTwoLine(project) {
   const jobNumber = String(project?.project_number || "").trim();
+  const name = String(project?.name || "").trim();
   const city = String(project?.city || "").trim();
   const st = String(project?.state_code || "").trim();
-  const cityState = city && st ? `${city}, ${st}` : city || st;
-  if (jobNumber && cityState) return `${jobNumber}\n${cityState}`;
-  return jobNumber || cityState || "";
+
+  const line1 = [jobNumber, name].filter(Boolean).join(" – ");
+  const line2 = city && st ? `${city}, ${st}` : city || st;
+
+  if (line1 && line2) return `${line1}\n${line2}`;
+  return line1 || line2 || "";
 }
 
-// --- Wrapping engine (match aha-fill behavior) ---
+// --- Wrapping engine ---
 function getFirstWidgetRect(textField) {
   try {
     const widgets = textField?.acroField?.getWidgets?.();
@@ -213,14 +231,12 @@ function wrapWordsToWidth(font, text, fontSize, maxWidth) {
 
     if (line) lines.push(line);
 
-    // If a single word is too long, hard-break it.
     if (widthOf(w) > maxWidth) {
       let chunk = "";
       for (const ch of w) {
         const cand2 = chunk + ch;
-        if (widthOf(cand2) <= maxWidth) {
-          chunk = cand2;
-        } else {
+        if (widthOf(cand2) <= maxWidth) chunk = cand2;
+        else {
           if (chunk) lines.push(chunk);
           chunk = ch;
         }
@@ -230,6 +246,7 @@ function wrapWordsToWidth(font, text, fontSize, maxWidth) {
       line = w;
     }
   }
+
   if (line) lines.push(line);
   return lines;
 }
@@ -250,9 +267,7 @@ function ellipsizeToWidth(font, text, fontSize, maxWidth) {
   if (widthOf(t) <= maxWidth) return t;
 
   let out = t;
-  while (out.length > 0 && widthOf(out + ell) > maxWidth) {
-    out = out.slice(0, -1);
-  }
+  while (out.length > 0 && widthOf(out + ell) > maxWidth) out = out.slice(0, -1);
   return (out.trimEnd() || "") + ell;
 }
 
@@ -284,8 +299,7 @@ function safeSetWrappedText({ form, fieldName, value, font, maxFontSize = 9, min
 
       let lines = [];
       for (let p = 0; p < paragraphs.length; p++) {
-        const para = paragraphs[p];
-        const paraLines = wrapWordsToWidth(font, para, size, maxWidth);
+        const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
         lines.push(...paraLines);
         if (p < paragraphs.length - 1) lines.push("");
       }
@@ -299,15 +313,14 @@ function safeSetWrappedText({ form, fieldName, value, font, maxFontSize = 9, min
       }
     }
 
-    // Truncate at min font size
+    // truncate at min font size
     const size = minFontSize;
     const lineHeight = size * 1.15;
     const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
 
     let lines = [];
     for (let p = 0; p < paragraphs.length; p++) {
-      const para = paragraphs[p];
-      const paraLines = wrapWordsToWidth(font, para, size, maxWidth);
+      const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
       lines.push(...paraLines);
       if (p < paragraphs.length - 1) lines.push("");
     }
@@ -320,6 +333,24 @@ function safeSetWrappedText({ form, fieldName, value, font, maxFontSize = 9, min
     } catch {}
     field.setText(lines.join("\n"));
   } catch {}
+}
+
+// --- Notes cleanup: remove “assumed/assuming/assumption” ---
+function cleanNotes(text) {
+  return cleanMulti(text)
+    .replace(/\bassumed\b/gi, "")
+    .replace(/\bassuming\b/gi, "")
+    .replace(/\bassumption\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// --- filename helpers ---
+function sanitizeFilePart(s) {
+  return String(s || "")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // --- Procore upload workflow ---
@@ -354,10 +385,7 @@ async function s3PostUpload({ uploadUrl, fields, fileBytes, filename }) {
   }
   fd.append("file", new Blob([fileBytes], { type: "application/pdf" }), filename);
 
-  const res = await fetch(uploadUrl, {
-    method: "POST",
-    body: fd,
-  });
+  const res = await fetch(uploadUrl, { method: "POST", body: fd });
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -365,7 +393,15 @@ async function s3PostUpload({ uploadUrl, fields, fileBytes, filename }) {
   }
 }
 
-async function procoreCreateProjectFile({ companyId, userId, projectId, parentFolderId, uploadId, uploadUuid, filename }) {
+async function procoreCreateProjectFile({
+  companyId,
+  userId,
+  projectId,
+  parentFolderId,
+  uploadId,
+  uploadUuid,
+  filename,
+}) {
   const pid = encodeURIComponent(String(projectId));
 
   const filePayload = {
@@ -373,8 +409,7 @@ async function procoreCreateProjectFile({ companyId, userId, projectId, parentFo
     name: String(filename),
   };
 
-  // IMPORTANT: Procore may require upload_id (numeric) OR upload_uuid (string).
-  // Passing uuid into upload_id causes: "File data was not found"
+  // IMPORTANT: support both upload_id and upload_uuid
   if (uploadId) filePayload.upload_id = uploadId;
   if (uploadUuid) filePayload.upload_uuid = String(uploadUuid);
 
@@ -395,31 +430,6 @@ async function procoreCreateProjectFile({ companyId, userId, projectId, parentFo
   }
 
   return r.data;
-}
-
-async function getTemplateFileName({ companyId, userId, projectId, templateFileId }) {
-  // Try to fetch file metadata to preserve naming conventions
-  const pid = encodeURIComponent(String(projectId));
-  const fid = encodeURIComponent(String(templateFileId));
-  const fileObj = await procoreGet({
-    companyId,
-    userId,
-    url: `/rest/v1.0/files/${fid}?project_id=${pid}`,
-  });
-
-  const name = String(fileObj?.name || "").trim();
-  return name || "";
-}
-
-function buildCompletedFilenameFromTemplate(templateName) {
-  const n = String(templateName || "").trim();
-  if (!n) return "AHA - Completed.pdf";
-
-  const base = n.replace(/\.pdf$/i, "");
-  if (/template/i.test(base)) {
-    return `${base.replace(/template/i, "Completed")}.pdf`;
-  }
-  return `${base} - Completed.pdf`;
 }
 
 // Keep GET for sanity
@@ -491,9 +501,9 @@ export async function POST(req) {
       form.updateFieldAppearances(font);
     } catch {}
 
-    // ===== Apply your formatting punch list HERE (this is the upload route) =====
+    // ===== Apply formatting requirements =====
 
-    // A) Project Location: Job Number + City/State from Procore project
+    // A) Project Location: Job# + Name, then City/ST from Procore project
     let projectLocation = "";
     try {
       const proj = await procoreFetchSafe(
@@ -508,17 +518,21 @@ export async function POST(req) {
     // B) Contractor: constant default
     const contractor = "Sessa Sheet Metal Contractors, Inc.";
 
-    // C) Prepared By: leave as-is (per your instruction)
+    // C) Prepared By: leave as-is
     const preparedBy = String(aha.header?.preparedByNameTitle || "").trim();
 
-    // D) Reviewed By logic: Pat unless Prepared By is Pat, then Bobby
+    // D) Reviewed By logic
     const preparedNorm = normalizeName(preparedBy);
     const isPatPrepared = preparedNorm === "pat lowrie" || preparedNorm.startsWith("pat lowrie ");
     const reviewedBy = isPatPrepared ? "Bobby Sigmon" : "Pat Lowrie";
 
+    // E) filename: "AHA - Activity - Date.pdf"
+    const activity = sanitizeFilePart(aha.header?.activityWorkTask) || "Activity";
+    const date = sanitizeFilePart(aha.header?.datePrepared) || new Date().toISOString().slice(0, 10);
+    const filename = `AHA - ${activity} - ${date}.pdf`;
+
     safeSetText(form, "ActivityWork Task", clampOneLine(aha.header?.activityWorkTask, 60), { fontSize: 10 });
 
-    // Project location: wrapped + multiline for two lines
     safeSetWrappedText({
       form,
       fieldName: "Project Location",
@@ -533,12 +547,18 @@ export async function POST(req) {
     safeSetText(form, "Prepared by NameTitle", clampOneLine(preparedBy, 38), { fontSize: 10 });
     safeSetText(form, "Reviewed by NameTitle", clampOneLine(reviewedBy, 38), { fontSize: 10 });
 
-    safeSetText(form, "Notes Field Notes Review Comments", clampMulti(aha.header?.notes, 240), {
-      multiline: true,
-      fontSize: 9,
+    // Notes: wrap to box + remove “assumed”
+    const notesClean = cleanNotes(aha.header?.notes || "");
+    safeSetWrappedText({
+      form,
+      fieldName: "Notes Field Notes Review Comments",
+      value: notesClean,
+      font,
+      maxFontSize: 9,
+      minFontSize: 8,
     });
 
-    // E) Job Steps/Hazards/Controls wrapping (Rows 1–5)
+    // Job Steps/Hazards/Controls wrap (Rows 1–5)
     const rows = Array.isArray(aha.jobStepRows) ? aha.jobStepRows : [];
     for (let i = 0; i < 5; i++) {
       const row = rows[i] || {};
@@ -551,7 +571,7 @@ export async function POST(req) {
       safeSetText(form, `RACRow${index}`, clampOneLine(row.rac, 2), { fontSize: 9 });
     }
 
-    // Equipment / Training / Inspection (leave as-is one-line, unless you want wrapping here too)
+    // Equipment / Training / Inspection (keep one-line)
     const equipment = Array.isArray(aha.resources?.equipmentToBeUsed) ? aha.resources.equipmentToBeUsed : [];
     const training = Array.isArray(aha.resources?.training) ? aha.resources.training : [];
     const inspection = Array.isArray(aha.resources?.inspectionRequirements) ? aha.resources.inspectionRequirements : [];
@@ -570,20 +590,7 @@ export async function POST(req) {
     form.flatten();
     const filledBytes = await pdfDoc.save();
 
-    // --- Filename: preserve template naming convention (don’t use projectId-based name) ---
-    let templateName = "";
-    try {
-      templateName = await getTemplateFileName({
-        companyId: String(companyId),
-        userId: String(session.userId),
-        projectId: String(projectId),
-        templateFileId: String(templateFileId),
-      });
-    } catch {}
-
-    const filename = buildCompletedFilenameFromTemplate(templateName);
-
-    // 1) Create project upload instructions
+    // Upload steps
     const upload = await procoreCreateProjectUpload({
       companyId: String(companyId),
       userId: String(session.userId),
@@ -591,7 +598,6 @@ export async function POST(req) {
       filename,
     });
 
-    // 2) Upload to storage provider
     await s3PostUpload({
       uploadUrl: upload.url,
       fields: upload.fields,
@@ -599,7 +605,6 @@ export async function POST(req) {
       filename,
     });
 
-    // 3) Create file in Completed folder (fix: use upload_id and/or upload_uuid correctly)
     const createdFile = await procoreCreateProjectFile({
       companyId: String(companyId),
       userId: String(session.userId),
