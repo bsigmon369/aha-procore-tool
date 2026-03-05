@@ -559,7 +559,7 @@ export async function POST(req) {
       value: notesClean,
       font,
       maxFontSize: 9,
-      minFontSize: 6.5,
+      minFontSize: 6,
       compress: true,
     });
 
@@ -569,9 +569,9 @@ export async function POST(req) {
       const row = rows[i] || {};
       const index = i + 1;
 
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 6.5, compress: true });
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 6.5, compress: true });
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 6.5, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 6, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 6, compress: true });
+      safeSetWrappedTextNoEllipsis({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 6, compress: true });
 
       safeSetText(form, `RACRow${index}`, clampOneLine(row.rac, 2), { fontSize: 9 });
     }
