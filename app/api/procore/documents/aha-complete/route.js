@@ -163,7 +163,9 @@ function safeSetText(form, name, value, opts = {}) {
     }
 
     field.setText(String(value ?? ""));
-  } catch {}
+  } catch {
+    // Ignore if field does not exist
+  }
 }
 
 function normalizeName(s) {
@@ -224,7 +226,7 @@ function compressForBox(text) {
   // Remove article clutter
   t = t.replace(/\b(the|a|an)\b/gi, "");
 
-  // Keep on one “paragraph” (no manual newlines)
+  // Keep one paragraph; do not insert manual line breaks
   t = t
     .replace(/[;:]/g, ",")
     .replace(/\.\s+/g, "; ")
@@ -236,27 +238,97 @@ function compressForBox(text) {
   return t;
 }
 
-// --- Wrapping engine (NO ellipsis; throw if too long) ---
+// ---------------------------------------------------
+// DEBUG helper (easy to disable later):
+// Flip this to false to silence FieldFit logs.
+const DEBUG_FIELD_FIT = true;
+
+function logFieldFit(fieldName, rect, fontSize, lineHeight, maxLines, wrappedLines) {
+  if (!DEBUG_FIELD_FIT) return;
+  console.log("FieldFit:", {
+    field: fieldName,
+    width: rect?.width,
+    height: rect?.height,
+    fontSize,
+    lineHeight,
+    maxLines,
+    wrappedLines,
+  });
+}
+// ---------------------------------------------------
+
+// --- Wrapping engine (NO ellipsis; never silent truncate; throw if too long) ---
+
+function toNumber(n) {
+  const x = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(x) ? x : null;
+}
+
+/**
+ * Robustly parse widget rectangle from pdf-lib.
+ * Handles:
+ * - Array form: [llx, lly, urx, ury]
+ * - Object form: { x, y, width, height }
+ * - Object form: { left, bottom, right, top }
+ */
 function getFirstWidgetRect(textField) {
   try {
     const widgets = textField?.acroField?.getWidgets?.();
     if (!widgets || !widgets.length) return null;
+
     const r = widgets[0].getRectangle();
-    return { x: r.x, y: r.y, width: r.width, height: r.height };
+
+    // Array-ish: [llx, lly, urx, ury]
+    if (Array.isArray(r) && r.length >= 4) {
+      const llx = toNumber(r[0]);
+      const lly = toNumber(r[1]);
+      const urx = toNumber(r[2]);
+      const ury = toNumber(r[3]);
+      if (llx == null || lly == null || urx == null || ury == null) return null;
+      const width = urx - llx;
+      const height = ury - lly;
+      if (!(width > 0) || !(height > 0)) return null;
+      return { x: llx, y: lly, width, height };
+    }
+
+    // Object form { x, y, width, height }
+    if (r && typeof r === "object") {
+      const x = toNumber(r.x ?? r.left);
+      const y = toNumber(r.y ?? r.bottom);
+      let width = toNumber(r.width);
+      let height = toNumber(r.height);
+
+      // Alternate { left, bottom, right, top }
+      if ((width == null || height == null) && r.right != null && r.top != null && x != null && y != null) {
+        const right = toNumber(r.right);
+        const top = toNumber(r.top);
+        if (right != null && top != null) {
+          width = right - x;
+          height = top - y;
+        }
+      }
+
+      if (x == null || y == null || width == null || height == null) return null;
+      if (!(width > 0) || !(height > 0)) return null;
+      return { x, y, width, height };
+    }
+
+    return null;
   } catch {
     return null;
   }
 }
 
-function wrapWordsToWidth(font, text, fontSize, maxWidth) {
-  const widthOf = (s) => {
-    try {
-      return font.widthOfTextAtSize(s, fontSize);
-    } catch {
-      return s.length * fontSize * 0.5;
-    }
-  };
+function widthOfText(font, s, fontSize) {
+  try {
+    return font.widthOfTextAtSize(String(s || ""), fontSize);
+  } catch {
+    // Fallback: rough estimate
+    return String(s || "").length * fontSize * 0.5;
+  }
+}
 
+function wrapWordsToWidth(font, text, fontSize, maxWidth) {
   const words = String(text || "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -268,20 +340,22 @@ function wrapWordsToWidth(font, text, fontSize, maxWidth) {
 
   for (const w of words) {
     const candidate = line ? `${line} ${w}` : w;
-    if (widthOf(candidate) <= maxWidth) {
+
+    if (widthOfText(font, candidate, fontSize) <= maxWidth) {
       line = candidate;
       continue;
     }
 
     if (line) lines.push(line);
 
-    // hard-break a single long word
-    if (widthOf(w) > maxWidth) {
+    // hard-break a single long word if needed
+    if (widthOfText(font, w, fontSize) > maxWidth) {
       let chunk = "";
       for (const ch of w) {
         const cand2 = chunk + ch;
-        if (widthOf(cand2) <= maxWidth) chunk = cand2;
-        else {
+        if (widthOfText(font, cand2, fontSize) <= maxWidth) {
+          chunk = cand2;
+        } else {
           if (chunk) lines.push(chunk);
           chunk = ch;
         }
@@ -296,56 +370,112 @@ function wrapWordsToWidth(font, text, fontSize, maxWidth) {
   return lines;
 }
 
+function normalizeForWrap(value, { preserveNewlines }) {
+  if (preserveNewlines) {
+    // Keep explicit newlines (used by Project Location format),
+    // but collapse runs of whitespace on each line.
+    return String(value ?? "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .map((ln) => ln.replace(/\s+/g, " ").trim())
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  // One paragraph only
+  return cleanOneLine(value);
+}
+
+function buildWrappedLines(font, text, fontSize, maxWidth, { preserveNewlines }) {
+  const t = normalizeForWrap(text, { preserveNewlines });
+
+  if (!t) return [];
+
+  if (!preserveNewlines) {
+    return wrapWordsToWidth(font, t, fontSize, maxWidth);
+  }
+
+  // Preserve explicit newline breaks (each line is a paragraph segment)
+  const parts = t.split("\n");
+  const out = [];
+  for (const part of parts) {
+    const p = String(part || "").trim();
+    if (!p) {
+      // Keep an empty line if user intentionally passed one (rare here)
+      out.push("");
+      continue;
+    }
+    out.push(...wrapWordsToWidth(font, p, fontSize, maxWidth));
+  }
+  return out;
+}
+
 function safeSetWrappedTextNoEllipsis({
   form,
   fieldName,
   value,
   font,
   maxFontSize = 9,
-  minFontSize = 6.5, // allow smaller font to reduce “too long” false positives
-  padding = 0.75,
-  lineHeightMult = 1.02,
+  minFontSize = 6.5,
+  fontStep = 0.25,
+  paddingX = 1.5,
+  paddingY = 1.5,
+  lineHeightMult = 1.0,
   compress = true,
+  preserveNewlines = false,
 }) {
-  const field = form.getTextField(fieldName);
+  // If field does not exist, ignore it.
+  let field;
+  try {
+    field = form.getTextField(fieldName);
+  } catch {
+    return;
+  }
+
   try {
     field.enableMultiline();
   } catch {}
 
   const rect = getFirstWidgetRect(field);
-  const candidates = [];
 
-  const base = cleanMulti(value);
+  const candidates = [];
+  const base = String(value ?? "");
   candidates.push(base);
   if (compress) candidates.push(compressForBox(base));
 
-  // If cannot measure, write compressed and do not error
+  // If cannot measure widget rect, write best candidate and do not error
   if (!rect) {
-    const v = candidates[candidates.length - 1] || "";
+    const v = candidates[candidates.length - 1] ?? "";
     try {
       field.setFontSize(maxFontSize);
     } catch {}
-    field.setText(v);
+    field.setText(String(v));
     return;
   }
 
-  const maxWidth = Math.max(1, rect.width - padding * 2);
-  const maxHeight = Math.max(1, rect.height - padding * 2);
+  const availWidth = Math.max(1, rect.width - paddingX * 2);
+  const availHeight = Math.max(1, rect.height - paddingY * 2);
+
+  // Guard: if numbers got weird, avoid false “too long”
+  if (!Number.isFinite(availWidth) || !Number.isFinite(availHeight)) {
+    const v = candidates[candidates.length - 1] ?? "";
+    try {
+      field.setFontSize(maxFontSize);
+    } catch {}
+    field.setText(String(v));
+    return;
+  }
 
   for (const candidateText of candidates) {
-    // Normalize any incoming newlines to spaces (prevents maxLines blowup)
-    const normalized = String(candidateText || "").replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
-    const paragraphs = [normalized];
-
-    for (let size = maxFontSize; size >= minFontSize; size -= 0.5) {
+    for (let size = maxFontSize; size >= minFontSize; size = Math.round((size - fontStep) * 100) / 100) {
       const lineHeight = size * lineHeightMult;
-      const maxLines = Math.max(1, Math.floor(maxHeight / lineHeight));
+      const maxLines = Math.max(1, Math.floor(availHeight / lineHeight));
 
-      let lines = [];
-      for (let p = 0; p < paragraphs.length; p++) {
-        const paraLines = wrapWordsToWidth(font, paragraphs[p], size, maxWidth);
-        lines.push(...paraLines);
-      }
+      const lines = buildWrappedLines(font, candidateText, size, availWidth, { preserveNewlines });
+
+      logFieldFit(fieldName, rect, size, lineHeight, maxLines, lines.length);
 
       if (lines.length <= maxLines) {
         try {
@@ -354,9 +484,14 @@ function safeSetWrappedTextNoEllipsis({
         field.setText(lines.join("\n"));
         return;
       }
+
+      // Safety to avoid infinite loops if fontStep is mis-set
+      if (fontStep <= 0) break;
+      if (size - fontStep < minFontSize) break;
     }
   }
 
+  // Must throw if field exists but cannot fit
   throw new Error(`Text string too long: ${fieldName}`);
 }
 
@@ -523,7 +658,9 @@ export async function POST(req) {
       if (proj.ok) projectLocation = buildProjectLocationTwoLine(proj.data);
     } catch {}
 
+    // Locked requirements
     const contractor = "Sessa Sheet Metal Contractors, Inc.";
+
     const preparedBy = String(aha.header?.preparedByNameTitle || "").trim();
     const preparedNorm = normalizeName(preparedBy);
     const isPatPrepared = preparedNorm === "pat lowrie" || preparedNorm.startsWith("pat lowrie ");
@@ -536,6 +673,7 @@ export async function POST(req) {
 
     safeSetText(form, "ActivityWork Task", clampOneLine(aha.header?.activityWorkTask, 60), { fontSize: 10 });
 
+    // Project Location: must be 2-line format; preserve newline between the two lines
     safeSetWrappedTextNoEllipsis({
       form,
       fieldName: "Project Location",
@@ -543,7 +681,12 @@ export async function POST(req) {
       font,
       maxFontSize: 10,
       minFontSize: 8,
+      fontStep: 0.25,
+      paddingX: 1.5,
+      paddingY: 1.5,
+      lineHeightMult: 1.0,
       compress: true,
+      preserveNewlines: true,
     });
 
     safeSetText(form, "Contractor", clampOneLine(contractor, 40), { fontSize: 10 });
@@ -551,7 +694,7 @@ export async function POST(req) {
     safeSetText(form, "Prepared by NameTitle", clampOneLine(preparedBy, 38), { fontSize: 10 });
     safeSetText(form, "Reviewed by NameTitle", clampOneLine(reviewedBy, 38), { fontSize: 10 });
 
-    // Notes: remove "assumed", compress to fit, throw if too long
+    // Notes: clean + compress; must throw if too long
     const notesClean = cleanNotes(aha.header?.notes || "");
     safeSetWrappedTextNoEllipsis({
       form,
@@ -559,19 +702,65 @@ export async function POST(req) {
       value: notesClean,
       font,
       maxFontSize: 9,
-      minFontSize: 6,
+      minFontSize: 6.5,
+      fontStep: 0.25,
+      paddingX: 2.0,
+      paddingY: 2.0,
+      lineHeightMult: 1.0,
       compress: true,
+      preserveNewlines: false,
     });
 
-    // Job Steps / Hazards / Controls: compress to fit, throw if too long
+    // Job Steps / Hazards / Controls: compress to fit; must throw if too long
     const rows = Array.isArray(aha.jobStepRows) ? aha.jobStepRows : [];
     for (let i = 0; i < 5; i++) {
       const row = rows[i] || {};
       const index = i + 1;
 
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `Job StepsRow${index}`, value: row.step, font, maxFontSize: 9, minFontSize: 6, compress: true });
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `HazardsRow${index}`, value: row.hazards, font, maxFontSize: 9, minFontSize: 6, compress: true });
-      safeSetWrappedTextNoEllipsis({ form, fieldName: `ControlsRow${index}`, value: row.controls, font, maxFontSize: 9, minFontSize: 6, compress: true });
+      safeSetWrappedTextNoEllipsis({
+        form,
+        fieldName: `Job StepsRow${index}`,
+        value: row.step,
+        font,
+        maxFontSize: 9,
+        minFontSize: 6.5,
+        fontStep: 0.25,
+        paddingX: 1.5,
+        paddingY: 1.5,
+        lineHeightMult: 1.0,
+        compress: true,
+        preserveNewlines: false,
+      });
+
+      safeSetWrappedTextNoEllipsis({
+        form,
+        fieldName: `HazardsRow${index}`,
+        value: row.hazards,
+        font,
+        maxFontSize: 9,
+        minFontSize: 6.5,
+        fontStep: 0.25,
+        paddingX: 1.5,
+        paddingY: 1.5,
+        lineHeightMult: 1.0,
+        compress: true,
+        preserveNewlines: false,
+      });
+
+      safeSetWrappedTextNoEllipsis({
+        form,
+        fieldName: `ControlsRow${index}`,
+        value: row.controls,
+        font,
+        maxFontSize: 9,
+        minFontSize: 6.5,
+        fontStep: 0.25,
+        paddingX: 1.5,
+        paddingY: 1.5,
+        lineHeightMult: 1.0,
+        compress: true,
+        preserveNewlines: false,
+      });
 
       safeSetText(form, `RACRow${index}`, clampOneLine(row.rac, 2), { fontSize: 9 });
     }
@@ -595,6 +784,7 @@ export async function POST(req) {
     form.flatten();
     const filledBytes = await pdfDoc.save();
 
+    // --- Procore upload workflow (unchanged) ---
     const upload = await procoreCreateProjectUpload({
       companyId: String(companyId),
       userId: String(session.userId),
@@ -629,6 +819,7 @@ export async function POST(req) {
   } catch (err) {
     const msg = err?.message || "Unknown error";
 
+    // Do NOT swallow this error
     if (msg.startsWith("Text string too long:")) {
       return jsonError(400, "Text string too long", {
         field: msg.replace("Text string too long:", "").trim(),
